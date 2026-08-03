@@ -1,0 +1,8 @@
+# packaging
+*.elf
+*.o
+*.code-workspace
+*.zip
+main/
+out/
+build/

@@ -1,0 +1,5 @@
+[neutrino-drivers]
+version = "0.1.0"
+strategy = "over_root"
+description = "Neutrino loadable drivers and module configuration"
+depends = ["base-system"]

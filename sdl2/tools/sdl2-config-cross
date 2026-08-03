@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+
+: "${SDL2_ROOT:?set SDL2_ROOT to the staged SDL2 root}"
+case "${1:-}" in
+    --version) printf '%s\n' '2.33.0' ;;
+    --cflags) printf '%s\n' "-I$SDL2_ROOT/include/SDL2 -D_REENTRANT" ;;
+    --libs) printf '%s\n' "-L$SDL2_ROOT/library -Wl,-rpath-link,$SDL2_ROOT/library -lSDL2" ;;
+    *) printf 'usage: %s --version|--cflags|--libs\n' "$0" >&2; exit 2 ;;
+esac

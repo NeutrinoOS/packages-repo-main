@@ -1,0 +1,7 @@
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR x86_64)
+set(CMAKE_C_COMPILER "$ENV{NEUTRINO_CC}")
+set(CMAKE_AR x86_64-elf-ar)
+set(CMAKE_RANLIB x86_64-elf-ranlib)
+set(CMAKE_STRIP x86_64-elf-strip)
+set(NEUTRINO ON CACHE BOOL "Build for Neutrino")

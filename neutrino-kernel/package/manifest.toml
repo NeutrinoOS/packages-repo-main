@@ -1,0 +1,5 @@
+[neutrino-kernel]
+version = "0.2.0"
+strategy = "over_boot"
+description = "Neutrino kernel for installed UEFI systems"
+depends = []

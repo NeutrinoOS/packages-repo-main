@@ -1,0 +1,5 @@
+[console-tools]
+version = "0.4.2"
+strategy = "over_root"
+description = "Console display and interactive console tools"
+depends = ["base-system"]

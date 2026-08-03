@@ -1,0 +1,5 @@
+[editor-tools]
+version = "0.3.2"
+strategy = "over_root"
+description = "File editing and writing utilities"
+depends = ["base-system"]

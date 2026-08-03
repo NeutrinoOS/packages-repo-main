@@ -1,0 +1,5 @@
+[text-tools]
+version = "0.3.2"
+strategy = "over_root"
+description = "Small text and timing utilities"
+depends = ["base-system"]

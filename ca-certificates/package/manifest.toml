@@ -1,0 +1,5 @@
+[ca-certificates]
+version = "0.1.0"
+strategy = "over_root"
+description = "Mozilla CA certificate trust store for TLS clients"
+depends = []
