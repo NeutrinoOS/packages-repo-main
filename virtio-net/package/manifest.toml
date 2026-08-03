@@ -1,0 +1,5 @@
+[virtio-net]
+version = "0.2.0"
+strategy = "over_root"
+description = "VirtIO network loadable kernel driver"
+depends = ["base-system"]

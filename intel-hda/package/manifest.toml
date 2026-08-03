@@ -1,0 +1,5 @@
+[intel-hda]
+version = "0.2.0"
+strategy = "over_root"
+description = "Intel High Definition Audio loadable kernel driver"
+depends = ["base-system"]

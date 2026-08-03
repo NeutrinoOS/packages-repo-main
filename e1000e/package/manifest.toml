@@ -1,0 +1,5 @@
+[e1000e]
+version = "0.2.0"
+strategy = "over_root"
+description = "Intel e1000e Ethernet loadable kernel driver"
+depends = ["base-system"]

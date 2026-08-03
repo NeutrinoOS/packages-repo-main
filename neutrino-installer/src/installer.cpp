@@ -85,9 +85,22 @@ constexpr const char* kBootstrapPackages[] = {
 constexpr const char* kOfflineReposPath = ".../packages/repos.cfg";
 constexpr const char* kOnlineReposPath = ".../config/neupak/repos.cfg";
 
+struct DriverPackage {
+    const char* module;
+    const char* package;
+};
+
+constexpr DriverPackage kDriverPackages[] = {
+    {"e1000e.ko", "e1000e"},
+    {"virtio-net.ko", "virtio-net"},
+    {"intel-hda.ko", "intel-hda"},
+    {"intel-uhd-gemini-lake.ko", "intel-uhd-gemini-lake"},
+};
+
 bool ensure_installed_directory(const char* target_root,
                                 const char* relative_path,
                                 long console);
+bool write_all(uint32_t file, const char* text);
 
 bool set_cursor(long console, uint32_t x, uint32_t y) {
     descriptor_defs::CursorPosition pos{x, y};
@@ -1347,6 +1360,127 @@ bool run_neupak(const char* target_root,
     return true;
 }
 
+bool loaded_driver_packages(bool (&loaded)[sizeof(kDriverPackages) /
+                                             sizeof(kDriverPackages[0])]) {
+    for (size_t i = 0; i < sizeof(loaded) / sizeof(loaded[0]); ++i) {
+        loaded[i] = false;
+    }
+
+    long count = module_count();
+    if (count < 0) {
+        return false;
+    }
+    for (size_t module_index = 0;
+         module_index < static_cast<size_t>(count);
+         ++module_index) {
+        ModuleInfo info{};
+        if (module_info(module_index, &info) != 0 ||
+            (info.flags & kModuleInfoDynamic) == 0) {
+            continue;
+        }
+        for (size_t driver = 0;
+             driver < sizeof(kDriverPackages) / sizeof(kDriverPackages[0]);
+             ++driver) {
+            if (strcmp(info.name, kDriverPackages[driver].module) == 0) {
+                loaded[driver] = true;
+            }
+        }
+    }
+    return true;
+}
+
+bool write_driver_load_list(
+    const char* target_root,
+    const bool (&loaded)[sizeof(kDriverPackages) / sizeof(kDriverPackages[0])],
+    long console) {
+    if (!ensure_installed_directory(target_root, "modules", console)) {
+        return false;
+    }
+    char path[160];
+    if (!append_path(target_root, "modules/loads.txt", path, sizeof(path))) {
+        return false;
+    }
+    file_remove(path);
+    long file = file_create(path);
+    if (file < 0) {
+        userspace::write_line(console, "failed to create installed driver load list");
+        return false;
+    }
+
+    bool ok = true;
+    for (size_t i = 0;
+         i < sizeof(kDriverPackages) / sizeof(kDriverPackages[0]);
+         ++i) {
+        if (!loaded[i]) continue;
+        if (!write_all(static_cast<uint32_t>(file),
+                       kDriverPackages[i].module) ||
+            !write_all(static_cast<uint32_t>(file), "\n")) {
+            ok = false;
+            break;
+        }
+    }
+    if (ok && file_sync(static_cast<uint32_t>(file)) != 0) {
+        ok = false;
+    }
+    file_close(static_cast<uint32_t>(file));
+    return ok;
+}
+
+bool install_detected_drivers(const char* target_root, long console) {
+    bool loaded[sizeof(kDriverPackages) / sizeof(kDriverPackages[0])];
+    if (!loaded_driver_packages(loaded)) {
+        userspace::write_line(console, "failed to inspect live-system drivers");
+        return false;
+    }
+
+    userspace::write_line(console, "Installing detected hardware drivers...");
+    for (size_t i = 0;
+         i < sizeof(kDriverPackages) / sizeof(kDriverPackages[0]);
+         ++i) {
+        if (!loaded[i]) continue;
+        char command[128];
+        strlcpy(command, "install ", sizeof(command));
+        strlcpy(command + strlen(command),
+                kDriverPackages[i].package,
+                sizeof(command) - strlen(command));
+        if (!run_neupak(target_root,
+                        command,
+                        kDriverPackages[i].package,
+                        console)) {
+            return false;
+        }
+    }
+    return write_driver_load_list(target_root, loaded, console);
+}
+
+bool prune_cloned_driver_packages(const char* target_root, long console) {
+    bool loaded[sizeof(kDriverPackages) / sizeof(kDriverPackages[0])];
+    if (!loaded_driver_packages(loaded) ||
+        !run_neupak(target_root,
+                    "uninstall neutrino-drivers",
+                    "driver metapackage",
+                    console)) {
+        return false;
+    }
+    for (size_t i = 0;
+         i < sizeof(kDriverPackages) / sizeof(kDriverPackages[0]);
+         ++i) {
+        if (loaded[i]) continue;
+        char command[128];
+        strlcpy(command, "uninstall ", sizeof(command));
+        strlcpy(command + strlen(command),
+                kDriverPackages[i].package,
+                sizeof(command) - strlen(command));
+        if (!run_neupak(target_root,
+                        command,
+                        kDriverPackages[i].package,
+                        console)) {
+            return false;
+        }
+    }
+    return write_driver_load_list(target_root, loaded, console);
+}
+
 bool bootstrap_packages(const char* target_root, long console) {
     set_cursor(console, 0, 7);
     userspace::write_line(console, "Installing base packages...");
@@ -1383,7 +1517,8 @@ bool bootstrap_packages(const char* target_root, long console) {
         !run_neupak(target_root,
                     "install neutrino-live",
                     "offline system package set",
-                    console)) {
+                    console) ||
+        !install_detected_drivers(target_root, console)) {
         return false;
     }
 
@@ -1764,6 +1899,12 @@ bool finalize_cloned_target(const Device& dst, long console) {
     target_root[0] = '/';
     target_root[1] = '\0';
     strlcpy(target_root + 1, dst.name, sizeof(target_root) - 1);
+
+    if (!prune_cloned_driver_packages(target_root, console)) {
+        userspace::write_line(console,
+                              "Failed to tailor cloned driver packages.");
+        return false;
+    }
 
     char user_store_path[160];
     if (!append_path(target_root,

@@ -1,5 +1,5 @@
 [neutrino-drivers]
-version = "0.1.0"
+version = "0.2.0"
 strategy = "over_root"
-description = "Neutrino loadable drivers and module configuration"
-depends = ["base-system"]
+description = "Complete metapackage for all Neutrino loadable hardware drivers"
+depends = ["e1000e", "virtio-net", "intel-hda", "intel-uhd-gemini-lake"]
