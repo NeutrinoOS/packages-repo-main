@@ -20,6 +20,12 @@ constexpr uint32_t kAccentFg = 0xFFFFD27Du;
 constexpr size_t kMaxLines = 256;
 constexpr size_t kLineCap = 192;
 constexpr size_t kMaxPath = 128;
+constexpr size_t kIndentWidth = 4;
+constexpr uint8_t kScancodeHome = 0x47;
+constexpr uint8_t kScancodePageUp = 0x49;
+constexpr uint8_t kScancodeEnd = 0x4F;
+constexpr uint8_t kScancodePageDown = 0x51;
+constexpr uint8_t kScancodeDelete = 0x53;
 
 char g_lines[kMaxLines][kLineCap];
 size_t g_line_count = 1;
@@ -28,6 +34,8 @@ size_t g_cursor_col = 0;
 size_t g_top_visual = 0;
 bool g_dirty = false;
 bool g_quit_armed = false;
+bool g_has_preferred_visual_col = false;
+size_t g_preferred_visual_col = 0;
 char g_status[96] = "Ready";
 
 bool set_cursor(long console, uint32_t x, uint32_t y) {
@@ -63,6 +71,23 @@ void defer_console_updates(long console, bool deferred) {
         static_cast<uint32_t>(descriptor_defs::Property::ConsoleUpdate),
         &value,
         sizeof(value));
+}
+
+void enable_cursor_blink(long console) {
+    uint8_t enabled = 1;
+    if (descriptor_set_property(
+            static_cast<uint32_t>(console),
+            static_cast<uint32_t>(
+                descriptor_defs::Property::ConsoleCursorBlink),
+            &enabled,
+            sizeof(enabled)) != 0) {
+        (void)descriptor_set_property(
+            static_cast<uint32_t>(console),
+            static_cast<uint32_t>(
+                descriptor_defs::Property::VtyCursorBlink),
+            &enabled,
+            sizeof(enabled));
+    }
 }
 
 void write_text(long console, const char* text) {
@@ -112,6 +137,13 @@ size_t wrap_width(uint32_t cols) {
     return cols > 4 ? static_cast<size_t>(cols) : 4;
 }
 
+uint32_t editor_body_rows(uint32_t rows) {
+    // Keep the final physical row unused. Filling its last cell advances the
+    // console and scrolls the rendered document, which would leave the cursor
+    // one row below the text position calculated before that scroll.
+    return rows > 4 ? rows - 4 : 1;
+}
+
 void wrap_segment(const char* line,
                   size_t start,
                   size_t width,
@@ -144,9 +176,6 @@ void wrap_segment(const char* line,
     if (found_space) {
         end = break_at;
         next_start = break_at + 1;
-        while (next_start < len && line[next_start] == ' ') {
-            ++next_start;
-        }
     } else {
         end = limit;
         next_start = limit;
@@ -188,7 +217,7 @@ size_t cursor_visual_position(size_t width, uint32_t& cursor_x) {
         size_t next = 0;
         wrap_segment(text, start, width, end, next);
         if (g_cursor_col >= start &&
-            (g_cursor_col <= end || next > len)) {
+            (g_cursor_col < next || next > len)) {
             size_t x = g_cursor_col > end ? end - start : g_cursor_col - start;
             if (x >= width) {
                 x = width - 1;
@@ -203,6 +232,107 @@ size_t cursor_visual_position(size_t width, uint32_t& cursor_x) {
         }
         start = next;
     }
+}
+
+size_t visual_row_count(size_t width) {
+    size_t rows = 0;
+    for (size_t line = 0; line < g_line_count; ++line) {
+        rows += visual_rows_for_line(g_lines[line], width);
+    }
+    return rows;
+}
+
+bool set_cursor_from_visual_position(size_t width,
+                                     size_t target_visual,
+                                     size_t target_x) {
+    size_t visual = 0;
+    for (size_t line_index = 0; line_index < g_line_count; ++line_index) {
+        const char* line = g_lines[line_index];
+        size_t len = strlen(line);
+        size_t start = 0;
+        while (true) {
+            size_t end = 0;
+            size_t next = 0;
+            wrap_segment(line, start, width, end, next);
+            if (visual == target_visual) {
+                size_t row_length = end >= start ? end - start : 0;
+                g_cursor_line = line_index;
+                g_cursor_col = start +
+                    (target_x < row_length ? target_x : row_length);
+                return true;
+            }
+            ++visual;
+            if (next > len) {
+                break;
+            }
+            start = next;
+        }
+    }
+    return false;
+}
+
+void reset_preferred_visual_column() {
+    g_has_preferred_visual_col = false;
+}
+
+void move_cursor_left() {
+    reset_preferred_visual_column();
+    if (g_cursor_col > 0) {
+        --g_cursor_col;
+    } else if (g_cursor_line > 0) {
+        --g_cursor_line;
+        g_cursor_col = strlen(g_lines[g_cursor_line]);
+    }
+}
+
+void move_cursor_right() {
+    reset_preferred_visual_column();
+    size_t len = strlen(g_lines[g_cursor_line]);
+    if (g_cursor_col < len) {
+        ++g_cursor_col;
+    } else if (g_cursor_line + 1 < g_line_count) {
+        ++g_cursor_line;
+        g_cursor_col = 0;
+    }
+}
+
+void move_cursor_vertical(int direction, size_t width, size_t distance = 1) {
+    uint32_t cursor_x = 0;
+    size_t current = cursor_visual_position(width, cursor_x);
+    if (!g_has_preferred_visual_col) {
+        g_preferred_visual_col = cursor_x;
+        g_has_preferred_visual_col = true;
+    }
+
+    size_t target = current;
+    if (direction < 0) {
+        target = distance < current ? current - distance : 0;
+    } else {
+        size_t rows = visual_row_count(width);
+        if (rows != 0) {
+            size_t last = rows - 1;
+            target = distance < last - current ? current + distance : last;
+        }
+    }
+    (void)set_cursor_from_visual_position(width,
+                                          target,
+                                          g_preferred_visual_col);
+}
+
+void move_cursor_home(bool document) {
+    reset_preferred_visual_column();
+    if (document) {
+        g_cursor_line = 0;
+    }
+    g_cursor_col = 0;
+}
+
+void move_cursor_end(bool document) {
+    reset_preferred_visual_column();
+    if (document) {
+        g_cursor_line = g_line_count - 1;
+    }
+    g_cursor_col = strlen(g_lines[g_cursor_line]);
 }
 
 bool query_console_size(uint32_t& cols, uint32_t& rows) {
@@ -293,7 +423,7 @@ void load_document(const char* path) {
 }
 
 void ensure_cursor_visible(uint32_t rows, uint32_t cols) {
-    size_t body_rows = rows > 3 ? rows - 3 : 1;
+    size_t body_rows = editor_body_rows(rows);
     uint32_t cursor_x = 0;
     size_t cursor_visual = cursor_visual_position(wrap_width(cols), cursor_x);
     if (cursor_visual < g_top_visual) {
@@ -319,7 +449,7 @@ void render(long console, const char* path, uint32_t cols, uint32_t rows) {
     pad_to(console, 17 + strlen(path) + (g_dirty ? 2 : 0), cols);
 
     set_color(console, kDefaultFg, kDefaultBg);
-    uint32_t body_rows = rows > 3 ? rows - 3 : 1;
+    uint32_t body_rows = editor_body_rows(rows);
     size_t width = wrap_width(cols);
     size_t visual = 0;
     uint32_t out_row = 0;
@@ -358,8 +488,10 @@ void render(long console, const char* path, uint32_t cols, uint32_t rows) {
 
     set_cursor(console, 0, body_rows + 1);
     set_color(console, kAccentFg, kDefaultBg);
-    write_text(console, "Ctrl+S Save  Ctrl+Q Quit  Enter New Line  Backspace Delete");
-    pad_to(console, 60, cols);
+    const char* help =
+        "Ctrl+S Save  Ctrl+Q Quit  Arrows Move  Home/End  PgUp/PgDn";
+    write_text(console, help);
+    pad_to(console, strlen(help), cols);
 
     char stat[128];
     strlcpy(stat, "Ln ", sizeof(stat));
@@ -388,6 +520,7 @@ void render(long console, const char* path, uint32_t cols, uint32_t rows) {
 }
 
 void insert_char(char ch) {
+    reset_preferred_visual_column();
     char* line = g_lines[g_cursor_line];
     size_t len = strlen(line);
     if (len + 1 >= kLineCap) {
@@ -402,6 +535,7 @@ void insert_char(char ch) {
 }
 
 void split_line() {
+    reset_preferred_visual_column();
     if (g_line_count >= kMaxLines) {
         set_status("Document full");
         return;
@@ -419,7 +553,25 @@ void split_line() {
     g_quit_armed = false;
 }
 
+void insert_indent() {
+    reset_preferred_visual_column();
+    char* line = g_lines[g_cursor_line];
+    size_t len = strlen(line);
+    if (len + kIndentWidth >= kLineCap) {
+        set_status("Line full");
+        return;
+    }
+    memmove(line + g_cursor_col + kIndentWidth,
+            line + g_cursor_col,
+            len - g_cursor_col + 1);
+    memset(line + g_cursor_col, ' ', kIndentWidth);
+    g_cursor_col += kIndentWidth;
+    g_dirty = true;
+    g_quit_armed = false;
+}
+
 void backspace() {
+    reset_preferred_visual_column();
     if (g_cursor_col > 0) {
         char* line = g_lines[g_cursor_line];
         size_t len = strlen(line);
@@ -452,6 +604,35 @@ void backspace() {
     g_quit_armed = false;
 }
 
+void delete_forward() {
+    reset_preferred_visual_column();
+    char* line = g_lines[g_cursor_line];
+    size_t len = strlen(line);
+    if (g_cursor_col < len) {
+        memmove(line + g_cursor_col,
+                line + g_cursor_col + 1,
+                len - g_cursor_col);
+        g_dirty = true;
+        g_quit_armed = false;
+        return;
+    }
+    if (g_cursor_line + 1 >= g_line_count) {
+        return;
+    }
+    size_t next_len = strlen(g_lines[g_cursor_line + 1]);
+    if (len + next_len + 1 >= kLineCap) {
+        set_status("Line full");
+        return;
+    }
+    strlcpy(line + len, g_lines[g_cursor_line + 1], kLineCap - len);
+    for (size_t i = g_cursor_line + 1; i + 1 < g_line_count; ++i) {
+        memcpy(g_lines[i], g_lines[i + 1], kLineCap);
+    }
+    --g_line_count;
+    g_dirty = true;
+    g_quit_armed = false;
+}
+
 }  // namespace
 
 int main(uint64_t arg_ptr, uint64_t) {
@@ -464,6 +645,7 @@ int main(uint64_t arg_ptr, uint64_t) {
     if (console < 0 || keyboard < 0) {
         return 1;
     }
+    enable_cursor_blink(console);
 
     load_document(path);
     uint32_t cols = 80;
@@ -490,26 +672,39 @@ int main(uint64_t arg_ptr, uint64_t) {
             int32_t dx = 0;
             int32_t dy = 0;
             if (keyboard::is_arrow_key(ev, dx, dy)) {
-                if (dy < 0 && g_cursor_line > 0) {
-                    --g_cursor_line;
-                } else if (dy > 0 && g_cursor_line + 1 < g_line_count) {
-                    ++g_cursor_line;
-                }
-                size_t len = strlen(g_lines[g_cursor_line]);
-                if (dx < 0 && g_cursor_col > 0) {
-                    --g_cursor_col;
-                } else if (dx > 0 && g_cursor_col < len) {
-                    ++g_cursor_col;
-                }
-                if (g_cursor_col > len) {
-                    g_cursor_col = len;
+                if (dy != 0) {
+                    move_cursor_vertical(dy, wrap_width(cols));
+                } else if (dx < 0) {
+                    move_cursor_left();
+                } else if (dx > 0) {
+                    move_cursor_right();
                 }
                 redraw = true;
                 continue;
             }
             char ch = keyboard::scancode_to_char(ev.scancode, ev.mods);
             bool ctrl = (ev.mods & descriptor_defs::kKeyboardModCtrl) != 0;
-            if (ctrl && (ch == 's' || ch == 'S')) {
+            bool extended = keyboard::is_extended(ev);
+            if (extended && ev.scancode == kScancodeHome) {
+                move_cursor_home(ctrl);
+                redraw = true;
+            } else if (extended && ev.scancode == kScancodeEnd) {
+                move_cursor_end(ctrl);
+                redraw = true;
+            } else if (extended && ev.scancode == kScancodePageUp) {
+                move_cursor_vertical(-1,
+                                     wrap_width(cols),
+                                     editor_body_rows(rows));
+                redraw = true;
+            } else if (extended && ev.scancode == kScancodePageDown) {
+                move_cursor_vertical(1,
+                                     wrap_width(cols),
+                                     editor_body_rows(rows));
+                redraw = true;
+            } else if (extended && ev.scancode == kScancodeDelete) {
+                delete_forward();
+                redraw = true;
+            } else if (ctrl && (ch == 's' || ch == 'S')) {
                 if (!save_document(path)) {
                     set_status("Save failed");
                 }
@@ -528,6 +723,9 @@ int main(uint64_t arg_ptr, uint64_t) {
                 redraw = true;
             } else if (ch == '\b' || ch == 0x7F) {
                 backspace();
+                redraw = true;
+            } else if (ch == '\t') {
+                insert_indent();
                 redraw = true;
             } else if (ch >= 0x20 && ch <= 0x7E) {
                 insert_char(ch);
