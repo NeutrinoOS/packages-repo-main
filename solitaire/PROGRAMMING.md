@@ -84,7 +84,7 @@ Many wrappers are very thin. Callers are expected to check negative returns and
 close handles they successfully open.
 
 `abi_major()` and `abi_minor()` report the userspace ABI version exposed by the
-kernel. The current kernel table reports ABI `1.0`.
+kernel. The current kernel table reports ABI `2.0`.
 
 ## Files and Directories
 

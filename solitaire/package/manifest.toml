@@ -1,5 +1,5 @@
 [solitaire]
-version = "0.5.1"
+version = "1.1.0"
 strategy = "over_root"
 description = "Simple Klondike solitaire TUI"
 depends = []
