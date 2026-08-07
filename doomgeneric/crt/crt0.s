@@ -9,7 +9,7 @@ _start:
     call main
     mov rdi, rax            ; exit status in rdi
 .exit_again:
-    mov rax, 2              ; SystemCall::Exit
+    mov rax, 3              ; SystemCall::Exit
     syscall
     jmp .exit_again
     
