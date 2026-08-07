@@ -4,6 +4,7 @@
 
 #include "../crt/syscall.hpp"
 #include "../libc/include/neutrino.h"
+#include <keyboard_scancode.hpp>
 
 namespace {
 
@@ -12,7 +13,8 @@ constexpr size_t kMaxTaskEntries = 256;
 constexpr size_t kMaxVisibleTasks = 12;
 constexpr size_t kMaxRenderRows = 64;
 constexpr uint64_t kExpectedTicksPerSecond = 100;
-constexpr uint64_t kRefreshSeconds = 5;
+constexpr uint64_t kRefreshMilliseconds = 1000;
+constexpr uint64_t kInputPollMilliseconds = 25;
 constexpr uint32_t kDefaultCols = 80;
 constexpr uint32_t kDefaultRows = 25;
 constexpr uint32_t kTaskStateUnused = 0;
@@ -191,14 +193,23 @@ bool clear_screen(long console) {
 
 bool set_cursor(long console, uint32_t x, uint32_t y) {
     descriptor_defs::CursorPosition pos{x, y};
+    long type = descriptor_get_type(static_cast<uint32_t>(console));
+    descriptor_defs::Property property =
+        type == static_cast<long>(descriptor_defs::Type::Vty)
+            ? descriptor_defs::Property::VtyCursor
+            : descriptor_defs::Property::ConsoleCursor;
     return descriptor_set_property(
                static_cast<uint32_t>(console),
-               static_cast<uint32_t>(descriptor_defs::Property::ConsoleCursor),
+               static_cast<uint32_t>(property),
                &pos,
                sizeof(pos)) == 0;
 }
 
 void defer_console_updates(long console, bool deferred) {
+    if (descriptor_get_type(static_cast<uint32_t>(console)) !=
+        static_cast<long>(descriptor_defs::Type::Console)) {
+        return;
+    }
     uint8_t value = deferred ? 1 : 0;
     descriptor_set_property(
         static_cast<uint32_t>(console),
@@ -330,18 +341,78 @@ uint64_t total_cpu_delta(const descriptor_defs::CpuUsage* current,
 }
 
 uint64_t display_cpu_total(uint64_t sampled_total) {
-    uint64_t expected = kExpectedTicksPerSecond * kRefreshSeconds;
+    uint64_t expected =
+        (kExpectedTicksPerSecond * kRefreshMilliseconds) / 1000;
     return sampled_total < expected ? expected : sampled_total;
 }
 
 uint64_t display_interval_total(uint64_t sampled_total, size_t cpu_count) {
-    uint64_t expected = kExpectedTicksPerSecond * kRefreshSeconds *
-                        static_cast<uint64_t>(cpu_count == 0 ? 1 : cpu_count);
+    uint64_t expected =
+        (kExpectedTicksPerSecond * kRefreshMilliseconds / 1000) *
+        static_cast<uint64_t>(cpu_count == 0 ? 1 : cpu_count);
     return sampled_total < expected ? expected : sampled_total;
 }
 
-void wait_for_next_sample() {
-    sleep_seconds(kRefreshSeconds);
+bool should_quit_from_input(long input, bool input_is_keyboard) {
+    if (input < 0) {
+        return false;
+    }
+
+    if (input_is_keyboard) {
+        descriptor_defs::KeyboardEvent events[8]{};
+        long result = descriptor_read(static_cast<uint32_t>(input),
+                                      events,
+                                      sizeof(events));
+        if (result <= 0) {
+            return false;
+        }
+        size_t count = static_cast<size_t>(result) / sizeof(events[0]);
+        for (size_t i = 0; i < count; ++i) {
+            const auto& event = events[i];
+            if (!keyboard::is_pressed(event) || keyboard::is_extended(event)) {
+                continue;
+            }
+            char ch = keyboard::scancode_to_char(event.scancode, event.mods);
+            bool ctrl =
+                (event.mods & descriptor_defs::kKeyboardModCtrl) != 0;
+            if (ch == 27 || ch == 'q' || ch == 'Q' ||
+                (ctrl && (ch == 'c' || ch == 'C'))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    uint8_t bytes[16]{};
+    long result = descriptor_read(static_cast<uint32_t>(input),
+                                  bytes,
+                                  sizeof(bytes));
+    if (result <= 0) {
+        return false;
+    }
+    for (long i = 0; i < result; ++i) {
+        if (bytes[i] == 3 || bytes[i] == 27 ||
+            bytes[i] == 'q' || bytes[i] == 'Q') {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool wait_for_next_sample(long input, bool input_is_keyboard) {
+    uint64_t waited = 0;
+    while (waited < kRefreshMilliseconds) {
+        if (should_quit_from_input(input, input_is_keyboard)) {
+            return false;
+        }
+        uint64_t remaining = kRefreshMilliseconds - waited;
+        uint64_t delay = remaining < kInputPollMilliseconds
+                             ? remaining
+                             : kInputPollMilliseconds;
+        sleep_ms(delay);
+        waited += delay;
+    }
+    return !should_quit_from_input(input, input_is_keyboard);
 }
 
 void finish_line(char* buffer,
@@ -477,6 +548,18 @@ void append_task_table(char* buffer,
 }  // namespace
 
 extern "C" int main(uint64_t, uint64_t) {
+    long input = process_get_standard_descriptor(0);
+    bool input_is_keyboard = false;
+    if (input < 0) {
+        input = descriptor_open(
+            static_cast<uint32_t>(descriptor_defs::Type::Keyboard), 0);
+        input_is_keyboard = input >= 0;
+    } else {
+        input_is_keyboard =
+            descriptor_get_type(static_cast<uint32_t>(input)) ==
+            static_cast<long>(descriptor_defs::Type::Keyboard);
+    }
+
     long console = neutrino_open_stdout();
     if (console < 0) {
         return 1;
@@ -505,7 +588,9 @@ extern "C" int main(uint64_t, uint64_t) {
 
     for (;;) {
         if (!first_render) {
-            wait_for_next_sample();
+            if (!wait_for_next_sample(input, input_is_keyboard)) {
+                break;
+            }
         }
 
         size_t current_cpu_count =
@@ -534,7 +619,12 @@ extern "C" int main(uint64_t, uint64_t) {
         console_dimensions(console, cols, rows);
 
         uint32_t render_rows = 0;
-        append_line(buffer, sizeof(g_render_buffer), length, "neutrino top", cols, render_rows);
+        append_line(buffer,
+                    sizeof(g_render_buffer),
+                    length,
+                    "neutrino top  (q/Esc/Ctrl+C to quit)",
+                    cols,
+                    render_rows);
         ++render_rows;
         append_line(buffer, sizeof(g_render_buffer), length, "", cols, render_rows);
         ++render_rows;
@@ -598,4 +688,10 @@ extern "C" int main(uint64_t, uint64_t) {
                sizeof(g_previous_line_widths));
         first_render = false;
     }
+
+    descriptor_close(static_cast<uint32_t>(task_desc));
+    descriptor_close(static_cast<uint32_t>(cpu_desc));
+    clear_screen(console);
+    set_cursor(console, 0, 0);
+    return 0;
 }
