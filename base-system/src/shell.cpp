@@ -201,6 +201,23 @@ bool set_console_color(long console, uint32_t fg, uint32_t bg) {
                sizeof(colors)) == 0;
 }
 
+void enable_cursor_blink(long console) {
+    uint8_t enabled = 1;
+    if (descriptor_set_property(
+            static_cast<uint32_t>(console),
+            static_cast<uint32_t>(
+                descriptor_defs::Property::ConsoleCursorBlink),
+            &enabled,
+            sizeof(enabled)) != 0) {
+        (void)descriptor_set_property(
+            static_cast<uint32_t>(console),
+            static_cast<uint32_t>(
+                descriptor_defs::Property::VtyCursorBlink),
+            &enabled,
+            sizeof(enabled));
+    }
+}
+
 void write_prompt(long console, const char* prompt, size_t prompt_len) {
     size_t user_len = strlen(g_session_user);
     size_t prefix_len = user_len + 3;
@@ -748,6 +765,7 @@ int main(uint64_t arg, uint64_t) {
         console = descriptor_open(kDescConsole, 0);
     }
     if (console < 0) return 1;
+    enable_cursor_blink(console);
 
     long input_handle = std_input;
     if (input_handle < 0) {
@@ -891,6 +909,10 @@ int main(uint64_t arg, uint64_t) {
                                          &input_buffer[input_length - 1],
                                          1);
                     }
+                    // Input activity should reveal the cursor immediately and
+                    // restart its blink interval, even through redirected
+                    // console descriptors.
+                    enable_cursor_blink(console);
                     rendered_length = input_length;
                 }
             }
