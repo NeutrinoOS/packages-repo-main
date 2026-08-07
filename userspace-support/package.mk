@@ -18,6 +18,9 @@ LIBC_SOURCES := $(SUPPORT_ROOT)/libc/ctype.cpp \
 LIBC_OBJECTS := $(patsubst $(SUPPORT_ROOT)/%.cpp,$(BUILD_DIR)/support/%.o,$(LIBC_SOURCES))
 HELPER_SOURCES := $(addprefix $(SUPPORT_ROOT)/helpers/,$(addsuffix .cpp,$(SUPPORT_HELPERS)))
 HELPER_OBJECTS := $(patsubst $(SUPPORT_ROOT)/%.cpp,$(BUILD_DIR)/support/%.o,$(HELPER_SOURCES))
+PROGRAM_OBJECTS := $(addprefix $(BUILD_DIR)/src/,$(addsuffix .o,$(PROGRAMS)))
+DEPENDENCY_FILES := $(PROGRAM_OBJECTS:.o=.d) $(LIBC_OBJECTS:.o=.d) $(HELPER_OBJECTS:.o=.d)
+SUPPORT_BUILD_MK := $(lastword $(MAKEFILE_LIST))
 PROGRAM_TARGETS := $(addprefix $(OUT_DIR)/,$(addsuffix .elf,$(PROGRAMS)))
 PACKAGE_ROOT := $(BUILD_DIR)/pkgroot
 PACKAGE_ZIP := $(OUT_DIR)/$(PACKAGE).zip
@@ -32,6 +35,7 @@ LDFLAGS ?= -Wl,--no-dynamic-linker
 EXTRA_LIBS ?=
 
 .PHONY: all package clean
+.SECONDARY: $(PROGRAM_OBJECTS)
 
 all: $(PROGRAM_TARGETS)
 
@@ -51,16 +55,18 @@ package: $(PROGRAM_TARGETS) $(PACKAGE_DIR)/manifest.toml | $(OUT_DIR)
 $(BUILD_DIR)/crt0.o: $(SUPPORT_ROOT)/crt/crt0.s | $(BUILD_DIR)
 	$(NASM) $(ASFLAGS) $< -o $@
 
-$(BUILD_DIR)/src/%.o: src/%.cpp | $(BUILD_DIR)
+$(BUILD_DIR)/src/%.o: src/%.cpp $(SUPPORT_BUILD_MK) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
-$(BUILD_DIR)/support/%.o: $(SUPPORT_ROOT)/%.cpp | $(BUILD_DIR)
+$(BUILD_DIR)/support/%.o: $(SUPPORT_ROOT)/%.cpp $(SUPPORT_BUILD_MK) | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD_DIR) $(OUT_DIR):
 	mkdir -p $@
 
 clean:
 	rm -rf $(BUILD_DIR) $(OUT_DIR)
+
+-include $(DEPENDENCY_FILES)
