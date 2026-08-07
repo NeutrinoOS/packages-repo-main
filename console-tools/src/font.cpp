@@ -11,12 +11,13 @@
 extern "C" const unsigned char tosh_sat_f14[3584];
 
 asm(
-    ".section .rodata\n"
+    ".pushsection .rodata\n"
     ".balign 1\n"
     ".global tosh_sat_f14\n"
     ".hidden tosh_sat_f14\n"
     "tosh_sat_f14:\n"
-    ".incbin \"shared/include/TOSH-SAT.F14\"\n");
+    ".incbin \"shared/include/TOSH-SAT.F14\"\n"
+    ".popsection\n");
 
 namespace {
 

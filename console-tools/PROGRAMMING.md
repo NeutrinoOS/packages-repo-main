@@ -1152,13 +1152,13 @@ needs one.
 ## ABI Versioning
 
 `abi_major()` and `abi_minor()` report the userspace ABI version exposed by the
-kernel. The current kernel table reports ABI `1.0`.
+kernel. The current kernel table reports ABI `2.0`.
 
 Use the ABI version when a program can run against multiple kernel/template
 versions and needs to choose behavior:
 
 ```cpp
-if (abi_major() != 1) {
+if (abi_major() != 2) {
     neutrino_write_line(out, "unsupported ABI");
     return 1;
 }
