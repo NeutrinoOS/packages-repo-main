@@ -1,5 +1,5 @@
 [ffmpeg]
-version = "0.5.2"
+version = "0.5.3"
 strategy = "over_root"
 description = "FFmpeg, FFplay, and FFprobe with shared development libraries"
 depends = ["sdl2", "bearssl", "ca-certificates"]
