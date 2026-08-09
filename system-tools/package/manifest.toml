@@ -1,5 +1,5 @@
 [system-tools]
-version = "1.2.0"
+version = "1.2.2"
 strategy = "over_root"
 description = "System inspection and account utilities"
 depends = ["base-system"]
