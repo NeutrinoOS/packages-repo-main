@@ -1,5 +1,5 @@
 [network-services]
-version = "0.1.0"
+version = "1.0.0"
 strategy = "over_root"
 description = "Neutrino network, TCP, and DHCP services"
 depends = ["base-system"]
