@@ -25,19 +25,19 @@ constexpr size_t kMaxInstallQueue = 96;
 constexpr size_t kCopyBufferSize = 4096;
 constexpr uint64_t kLockStaleSeconds = 30ull;
 
-constexpr const char* kDownloadPath = ".../binary/download.elf";
+constexpr const char* kDownloadPath = "@sys/binary/download.elf";
 
-char kSysrootPrefix[kMaxPath] = "...";
-char kConfigDir[kMaxPath] = ".../config/neupak";
-char kCacheDir[kMaxPath] = ".../config/neupak/cache";
-char kRepoCacheDir[kMaxPath] = ".../config/neupak/cache/repos";
-char kPackageCacheDir[kMaxPath] = ".../config/neupak/cache/packages";
-char kExtractDir[kMaxPath] = ".../config/neupak/cache/extract";
-char kManifestCachePath[kMaxPath] = ".../config/neupak/cache/manifest.tmp";
-char kReposPath[kMaxPath] = ".../config/neupak/repos.cfg";
-char kInstalledPath[kMaxPath] = ".../config/neupak/install.db";
-char kFilesPath[kMaxPath] = ".../config/neupak/files.db";
-char kLockPath[kMaxPath] = ".../config/neupak/db.lck";
+char kSysrootPrefix[kMaxPath] = "@sys";
+char kConfigDir[kMaxPath] = "@sys/config/neupak";
+char kCacheDir[kMaxPath] = "@sys/config/neupak/cache";
+char kRepoCacheDir[kMaxPath] = "@sys/config/neupak/cache/repos";
+char kPackageCacheDir[kMaxPath] = "@sys/config/neupak/cache/packages";
+char kExtractDir[kMaxPath] = "@sys/config/neupak/cache/extract";
+char kManifestCachePath[kMaxPath] = "@sys/config/neupak/cache/manifest.tmp";
+char kReposPath[kMaxPath] = "@sys/config/neupak/repos.cfg";
+char kInstalledPath[kMaxPath] = "@sys/config/neupak/install.db";
+char kFilesPath[kMaxPath] = "@sys/config/neupak/files.db";
+char kLockPath[kMaxPath] = "@sys/config/neupak/db.lck";
 
 long g_console = -1;
 long g_lock = -1;
@@ -201,9 +201,9 @@ bool valid_offline_root(const char* path) {
 
 bool configure_target_root(const char* root) {
     if (root == nullptr) {
-        root = "...";
+        root = "@sys";
     }
-    if (strcmp(root, "...") != 0 && !valid_offline_root(root)) {
+    if (strcmp(root, "@sys") != 0 && !valid_offline_root(root)) {
         print_line("neupak: --root must name an absolute mounted directory (not /)");
         return false;
     }
@@ -416,11 +416,11 @@ bool ensure_dir_tree(const char* path) {
     char partial[kMaxPath];
     size_t len = 0;
     size_t i = 0;
-    if (userspace::text::starts_with(path, "...") && path[3] == '/') {
+    if (userspace::text::starts_with(path, "@sys") && path[4] == '/') {
         if (!userspace::text::append_text(partial, sizeof(partial), len, kSysrootPrefix)) {
             return false;
         }
-        i = 3;
+        i = 4;
     } else if (path[0] == '/') {
         partial[len++] = '/';
         partial[len] = '\0';
@@ -433,7 +433,7 @@ bool ensure_dir_tree(const char* path) {
             return false;
         }
         if (path[i] == '/') {
-            if (len > 1 && strcmp(partial, ".../") != 0) {
+            if (len > 1 && strcmp(partial, "@sys/") != 0) {
                 partial[len - 1] = '\0';
                 if (!ensure_dir(partial)) {
                     return false;
@@ -455,7 +455,7 @@ bool ensure_parent_dir(const char* path) {
     while (len > 0 && parent[len - 1] != '/') {
         --len;
     }
-    if (len <= 1 || (len == 4 && strncmp(parent, ".../", 4) == 0)) {
+    if (len <= 1 || (len == 5 && strncmp(parent, "@sys/", 5) == 0)) {
         return true;
     }
     parent[len - 1] = '\0';
@@ -895,7 +895,7 @@ bool parse_repos_cfg(Repo* repos, size_t& repo_count) {
     char* text = nullptr;
     size_t len = 0;
     if (!read_file_limited(kReposPath, text, len)) {
-        print_line("neupak: missing .../config/neupak/repos.cfg");
+        print_line("neupak: missing @sys/config/neupak/repos.cfg");
         return false;
     }
     Repo* current = nullptr;

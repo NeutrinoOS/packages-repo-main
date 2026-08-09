@@ -935,7 +935,7 @@ bool append_trust_anchor_from_der(TrustStore& store, const uint8_t* der, size_t 
 bool load_trust_store(TrustStore& store) {
     Buffer pem_bytes{};
     if (!load_file("/config/ssl/cacert.pem", pem_bytes) &&
-        !load_file(".../config/ssl/cacert.pem", pem_bytes) &&
+        !load_file("@sys/config/ssl/cacert.pem", pem_bytes) &&
         !load_file("config/ssl/cacert.pem", pem_bytes)) {
         return false;
     }
@@ -1223,7 +1223,7 @@ bool ensure_parent_dir(const char* path) {
     while (len > 0 && parent[len - 1] != '/') {
         --len;
     }
-    if (len == 0 || len == 1 || (len == 4 && strncmp(parent, ".../", 4) == 0)) {
+    if (len == 0 || len == 1 || (len == 5 && strncmp(parent, "@sys/", 5) == 0)) {
         return true;
     }
     parent[len - 1] = '\0';
@@ -1231,10 +1231,10 @@ bool ensure_parent_dir(const char* path) {
     char partial[256];
     size_t used = 0;
     size_t i = 0;
-    if (strncmp(parent, ".../", 4) == 0) {
-        strlcpy(partial, "...", sizeof(partial));
-        used = 3;
-        i = 3;
+    if (strncmp(parent, "@sys/", 5) == 0) {
+        strlcpy(partial, "@sys", sizeof(partial));
+        used = 4;
+        i = 4;
     } else if (parent[0] == '/') {
         partial[used++] = '/';
         partial[used] = '\0';
@@ -1250,7 +1250,7 @@ bool ensure_parent_dir(const char* path) {
         partial[used++] = parent[i];
         partial[used] = '\0';
         if (parent[i] == '/') {
-            if (strcmp(partial, ".../") != 0) {
+            if (strcmp(partial, "@sys/") != 0) {
                 partial[used - 1] = '\0';
                 if (!ensure_dir(partial)) {
                     return false;
