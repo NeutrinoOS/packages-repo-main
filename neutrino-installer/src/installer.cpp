@@ -21,12 +21,12 @@ constexpr uint32_t kDefaultFg = 0xFFFFFFFF;
 constexpr uint32_t kDefaultBg = 0x00000000;
 constexpr long kWouldBlock = -2;
 constexpr const char* kInstallerPath = "binary/installer.elf";
-constexpr const char* kNeupakPath = ".../binary/neupak.elf";
+constexpr const char* kNeupakPath = "@sys/binary/neupak.elf";
 constexpr const char* kUserDirectory = "user";
 constexpr const char* kRootHomeDirectory = "user/root";
 constexpr uint8_t kNeufsMagic[8] = {
     0x4E, 0x45, 0x55, 0x46, 0x53, 0x00, 0x77, 0x42};
-constexpr int32_t kNeufsVersion = 1;
+constexpr int32_t kNeufsVersion = 2;
 constexpr uint8_t kTypeNdir = 0;
 constexpr const char* kEspModuleDevice = "MEMDISK_1_0";
 constexpr uint64_t kGptEntryCount = 128;
@@ -40,6 +40,7 @@ struct NeufsRvt {
     int32_t version;
     char name[16];
     uint64_t root;
+    char preferred_alias[32];
 };
 
 struct NeufsNdir {
@@ -77,13 +78,13 @@ struct Device {
 };
 
 constexpr const char* kBootstrapPackages[] = {
-    ".../packages/base-system.zip",
-    ".../packages/bearssl.zip",
-    ".../packages/ca-certificates.zip",
-    ".../packages/neupak.zip",
+    "@sys/packages/base-system.zip",
+    "@sys/packages/bearssl.zip",
+    "@sys/packages/ca-certificates.zip",
+    "@sys/packages/neupak.zip",
 };
-constexpr const char* kOfflineReposPath = ".../packages/repos.cfg";
-constexpr const char* kOnlineReposPath = ".../config/neupak/repos.cfg";
+constexpr const char* kOfflineReposPath = "@sys/packages/repos.cfg";
+constexpr const char* kOnlineReposPath = "@sys/config/neupak/repos.cfg";
 
 struct DriverPackage {
     const char* module;
