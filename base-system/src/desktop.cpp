@@ -30,8 +30,8 @@ struct Theme {
     uint32_t accent = 0x40a9d3;
     uint32_t taskbar_height = 42;
     char launcher_label[17] = "DOOM";
-    char launcher_path[96] = ".../binary/doom.elf";
-    char launcher_args[160] = "-iwad .../doom1.wad";
+    char launcher_path[96] = "@sys/binary/doom.elf";
+    char launcher_args[160] = "-iwad @sys/doom1.wad";
 };
 
 struct Window {
@@ -146,7 +146,7 @@ void apply_setting(const char* key, const char* value) {
 }
 
 void load_config() {
-    long file = file_open(".../config/desktop.cfg");
+    long file = file_open("@sys/config/desktop.cfg");
     if (file < 0) return;
     char bytes[1024]{};
     long count = file_read(static_cast<uint32_t>(file), bytes, sizeof(bytes) - 1);

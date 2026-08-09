@@ -9,8 +9,8 @@
 
 namespace {
 
-constexpr const char* kDefaultShellPath = ".../binary/shell.elf";
-constexpr const char* kSpawnConfigPath = ".../config/spawn.cfg";
+constexpr const char* kDefaultShellPath = "@sys/binary/shell.elf";
+constexpr const char* kSpawnConfigPath = "@sys/config/spawn.cfg";
 constexpr const char* kPrimaryUserStorePath = "/system/users.ntd";
 constexpr const char* kFallbackUserStorePath = "/users.ntd";
 constexpr size_t kConfigBufferSize = 1024;
@@ -650,21 +650,29 @@ bool split_spawn_target(char* line, char*& command_out, const char*& user_out) {
     }
 
     if (command[0] == '@') {
-        ++command;
-        char* user_end = command;
-        while (*user_end != '\0' && !isspace(*user_end)) {
-            ++user_end;
+        char* token_end = command + 1;
+        bool namespace_path = false;
+        while (*token_end != '\0' && !isspace(*token_end)) {
+            namespace_path = namespace_path || *token_end == '/';
+            ++token_end;
         }
-        if (user_end == command) {
-            return false;
-        }
-        if (*user_end != '\0') {
-            *user_end++ = '\0';
-        }
-        user_out = command;
-        command = skip_spaces(user_end);
-        if (command == nullptr || command[0] == '\0') {
-            return false;
+
+        // Volume namespaces such as @sys/binary/networkd.elf are executable
+        // paths, not the optional "@user command" principal selector.
+        if (!namespace_path) {
+            ++command;
+            char* user_end = token_end;
+            if (user_end == command) {
+                return false;
+            }
+            if (*user_end != '\0') {
+                *user_end++ = '\0';
+            }
+            user_out = command;
+            command = skip_spaces(user_end);
+            if (command == nullptr || command[0] == '\0') {
+                return false;
+            }
         }
     }
 

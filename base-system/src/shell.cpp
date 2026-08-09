@@ -114,7 +114,7 @@ uint32_t parse_vty_arg(const char* args) {
     return 0;
 }
 
-char g_current_cwd[128] = "/";
+char g_current_cwd[128] = "@sys";
 char g_session_user[32] = "root";
 
 void strip_control(char* str) {
@@ -147,8 +147,8 @@ size_t build_search_directories(const char* cwd,
         ++count;
     };
 
-    append(".../binary");
-    append(".../BINARY");
+    append("@sys/binary");
+    append("@sys/BINARY");
 
     return count;
 }
@@ -275,7 +275,7 @@ void maybe_enter_home_directory() {
 
     char home[128];
     size_t idx = 0;
-    const char prefix[] = "/user/";
+    const char prefix[] = "@sys/user/";
     for (size_t i = 0; prefix[i] != '\0' && idx + 1 < sizeof(home); ++i) {
         home[idx++] = prefix[i];
     }
@@ -601,8 +601,7 @@ void execute_command(long console, const char* line) {
         }
 
         if (target_len == 0) {
-            target_buf[0] = '/';
-            target_buf[1] = '\0';
+            strlcpy(target_buf, "@sys", sizeof(target_buf));
         } else {
             target_buf[target_len] = '\0';
         }
@@ -700,7 +699,7 @@ void execute_command(long console, const char* line) {
                 path_info[idx++] = text[i];
             }
         };
-        append_literal("simple shell (PATH=.../binary:.../BINARY)");
+        append_literal("simple shell (PATH=@sys/binary:@sys/BINARY)");
         path_info[idx] = '\0';
         print_line(console, path_info);
         print_line(console, "builtins: cd, help, whoami, spawn, burst");
@@ -775,8 +774,7 @@ int main(uint64_t arg, uint64_t) {
 
     long cwd_len = getcwd(g_current_cwd, sizeof(g_current_cwd));
     if (cwd_len < 0 || g_current_cwd[0] == '\0') {
-        g_current_cwd[0] = '/';
-        g_current_cwd[1] = '\0';
+        strlcpy(g_current_cwd, "@sys", sizeof(g_current_cwd));
     }
     maybe_enter_home_directory();
 
