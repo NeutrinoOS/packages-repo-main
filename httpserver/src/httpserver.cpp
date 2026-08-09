@@ -483,11 +483,31 @@ int main(uint64_t arg_ptr, uint64_t) {
     print("\n");
 
     Connection connections[kMaxConnections]{};
+    descriptor_defs::DescriptorWait waits[kMaxConnections + 1]{};
     for (;;) {
         poll_connections(connections);
         tcpd_protocol::Message event{};
         if (!tcpd_protocol::read_message(static_cast<uint32_t>(reply_pipe), event)) {
-            yield();
+            size_t wait_count = 0;
+            waits[wait_count].handle = static_cast<uint32_t>(reply_pipe);
+            waits[wait_count].events = descriptor_defs::kWaitRead;
+            waits[wait_count].revents = 0;
+            waits[wait_count].reserved = 0;
+            ++wait_count;
+
+            for (size_t i = 0; i < kMaxConnections; ++i) {
+                if (!connections[i].in_use || connections[i].endpoint == 0) {
+                    continue;
+                }
+                waits[wait_count].handle = connections[i].endpoint;
+                waits[wait_count].events = descriptor_defs::kWaitRead;
+                waits[wait_count].revents = 0;
+                waits[wait_count].reserved = 0;
+                ++wait_count;
+            }
+            if (descriptor_wait(waits, wait_count) < 0) {
+                yield();
+            }
             continue;
         }
         if (event.type == tcpd_protocol::kAcceptEvent) {
