@@ -883,7 +883,7 @@ bool load_trust_store(TrustStore& store) {
     print_line("browse: load_trust_store begin");
     Buffer pem_bytes{};
     if (!load_file("/config/ssl/cacert.pem", pem_bytes) &&
-        !load_file(".../config/ssl/cacert.pem", pem_bytes) &&
+        !load_file("@sys/config/ssl/cacert.pem", pem_bytes) &&
         !load_file("config/ssl/cacert.pem", pem_bytes)) {
         print_line("browse: no cacert.pem");
         return false;
