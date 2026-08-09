@@ -754,6 +754,18 @@ bool spawn_from_config() {
     return spawned_any;
 }
 
+void reap_children(void*) {
+    for (;;) {
+        // A blocking wait keeps init's service children from remaining as
+        // terminated task-table entries after they exit.
+        if (process_wait_child() < 0) {
+            // There may be no children between boot services and a later
+            // login session. Avoid turning that gap into another busy loop.
+            sleep_ms(100);
+        }
+    }
+}
+
 }  // namespace
 
 int main(uint64_t, uint64_t) {
@@ -776,6 +788,9 @@ int main(uint64_t, uint64_t) {
         for (;;) {
             sleep_ns(1000000000ull);
         }
+    }
+    if (thread_create(reap_children, nullptr) < 0) {
+        print("init: failed to start child reaper\n");
     }
     (void)spawn_from_config();
     run_login_loop();
