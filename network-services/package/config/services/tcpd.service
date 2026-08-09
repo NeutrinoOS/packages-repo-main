@@ -1,0 +1,6 @@
+description=TCP connection service
+executable=@sys/binary/tcpd.elf
+user=root
+after=networkd
+enabled=true
+restart=on-failure

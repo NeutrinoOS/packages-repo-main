@@ -56,11 +56,14 @@ uint8_t* g_frame_buffer = nullptr;
 bool poll_network(ServerContext& ctx);
 
 void print(const char* text) {
-    static int32_t console = -1;
-    if (console < 0) {
-        console = static_cast<int32_t>(
-            descriptor_open(static_cast<uint32_t>(descriptor_defs::Type::Console), 0));
-        if (console < 0) {
+    static int32_t output = -1;
+    if (output < 0) {
+        output = static_cast<int32_t>(process_get_standard_descriptor(1));
+        if (output < 0) {
+            output = static_cast<int32_t>(descriptor_open(
+                static_cast<uint32_t>(descriptor_defs::Type::Console), 0));
+        }
+        if (output < 0) {
             return;
         }
     }
@@ -72,7 +75,7 @@ void print(const char* text) {
         ++len;
     }
     if (len != 0) {
-        descriptor_write(static_cast<uint32_t>(console), text, len);
+        descriptor_write(static_cast<uint32_t>(output), text, len);
     }
 }
 

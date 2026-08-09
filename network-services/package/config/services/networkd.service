@@ -1,0 +1,5 @@
+description=Network device and IP protocol service
+executable=@sys/binary/networkd.elf
+user=root
+enabled=true
+restart=on-failure

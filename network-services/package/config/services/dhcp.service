@@ -1,0 +1,7 @@
+description=DHCP address configuration service
+executable=@sys/binary/dhcp.elf
+user=root
+after=networkd
+type=oneshot
+enabled=true
+restart=never
