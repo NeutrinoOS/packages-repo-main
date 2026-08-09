@@ -1,4 +1,4 @@
 PACKAGE := system-tools
-PROGRAMS := lspci top userctl dmesg insmod lsdisk lsmod mkneufs mkpart mount sensors shutdown
+PROGRAMS := lspci top tree userctl dmesg insmod lsdisk lsmod mkneufs mkpart mount sensors shutdown
 SUPPORT_HELPERS := args console
 include ../userspace-support/package.mk
