@@ -17,7 +17,7 @@ constexpr long kWouldBlock = -2;
 
 constexpr uint8_t kNeufsMagic[8] = {
     0x4E, 0x45, 0x55, 0x46, 0x53, 0x00, 0x77, 0x42};
-constexpr int32_t kNeufsVersion = 1;
+constexpr int32_t kNeufsVersion = 2;
 constexpr uint8_t kTypeNdir = 0;
 
 #pragma pack(push, 1)
@@ -26,6 +26,7 @@ struct NeufsRvt {
     int32_t version;
     char name[16];
     uint64_t root;
+    char preferred_alias[32];
 };
 
 struct NeufsNdir {
@@ -48,7 +49,33 @@ static_assert(sizeof(NeufsNdir) % 4 == 0);
 struct Args {
     char device[64];
     char label[16];
+    char preferred_alias[32];
 };
+
+bool valid_alias(const char* alias) {
+    if (alias == nullptr || alias[0] == '\0') return true;
+    size_t length = 0;
+    while (alias[length] != '\0') {
+        char c = alias[length];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.')) {
+            return false;
+        }
+        ++length;
+    }
+    if ((length == 1 && alias[0] == '.') ||
+        (length == 2 && alias[0] == '.' && alias[1] == '.')) {
+        return false;
+    }
+    if (length == 3) {
+        char a = alias[0], b = alias[1], c = alias[2];
+        if (a >= 'A' && a <= 'Z') a = static_cast<char>(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = static_cast<char>(b + ('a' - 'A'));
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c + ('a' - 'A'));
+        if (a == 's' && b == 'y' && c == 's') return false;
+    }
+    return true;
+}
 
 void print_progress(long console, const char* action, uint64_t done, uint64_t total) {
     uint64_t percent = total == 0 ? 100 : (done * 100) / total;
@@ -82,7 +109,15 @@ bool parse_args(const char* raw, Args& out) {
             return false;
         }
         cursor = userspace::skip_spaces(cursor);
-        return cursor == nullptr || *cursor == '\0';
+        if (cursor != nullptr && *cursor != '\0') {
+            if (!userspace::copy_token(cursor, out.preferred_alias,
+                                       sizeof(out.preferred_alias))) {
+                return false;
+            }
+            cursor = userspace::skip_spaces(cursor);
+        }
+        return (cursor == nullptr || *cursor == '\0') &&
+               valid_alias(out.preferred_alias);
     }
 
     const char* default_label = "neufs";
@@ -309,6 +344,8 @@ bool format_neufs(long console,
     }
     rvt.version = kNeufsVersion;
     memcpy(rvt.name, args.label, strlen(args.label));
+    memcpy(rvt.preferred_alias, args.preferred_alias,
+           strlen(args.preferred_alias));
     rvt.root = root_offset;
     if (!write_bytes(handle, 0, &rvt, sizeof(rvt), sector, geom.sector_size)) {
         userspace::write_line(console, "mkneufs: failed to write RVT");
@@ -376,6 +413,10 @@ bool format_neufs(long console,
     userspace::write(console, args.device);
     userspace::write(console, " label=");
     userspace::write_line(console, args.label);
+    if (args.preferred_alias[0] != '\0') {
+        userspace::write(console, "mkneufs: preferred_alias=@");
+        userspace::write_line(console, args.preferred_alias);
+    }
     userspace::write(console, "mkneufs: sectors=");
     userspace::write_u64(console, geom.sector_count);
     userspace::write(console, " sector_size=");
@@ -399,8 +440,10 @@ int main(uint64_t arg_ptr, uint64_t) {
     Args args{};
     const char* raw = reinterpret_cast<const char*>(arg_ptr);
     if (!parse_args(raw, args)) {
-        userspace::write_line(console, "usage: mkneufs <block-device> [label]");
-        userspace::write_line(console, "example: mkneufs IDE_SM_0 scratch");
+        userspace::write_line(console,
+                              "usage: mkneufs <block-device> [label] [alias]");
+        userspace::write_line(console,
+                              "example: mkneufs IDE_SM_0 scratch data");
         return 1;
     }
 
