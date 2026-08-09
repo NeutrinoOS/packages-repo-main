@@ -6,11 +6,12 @@
 #include "../crt/syscall.hpp"
 #include "../auth/password_hash.hpp"
 #include "keyboard_scancode.hpp"
+#include "service_protocol.hpp"
 
 namespace {
 
 constexpr const char* kDefaultShellPath = "@sys/binary/shell.elf";
-constexpr const char* kSpawnConfigPath = "@sys/config/spawn.cfg";
+constexpr const char* kServiceDirectory = "@sys/config/services";
 constexpr const char* kPrimaryUserStorePath = "/system/users.ntd";
 constexpr const char* kFallbackUserStorePath = "/users.ntd";
 constexpr size_t kConfigBufferSize = 1024;
@@ -18,6 +19,44 @@ constexpr size_t kMaxUserNameLength = 32;
 constexpr size_t kMaxLoginUsers = 32;
 constexpr const char* kRootUserName = "root";
 constexpr uint64_t kAllCapabilities = ~0ull;
+constexpr size_t kMaxServices = 24;
+constexpr size_t kServiceDescriptionSize = 96;
+constexpr size_t kServicePathSize = 192;
+constexpr size_t kServiceArgsSize = 192;
+constexpr size_t kServiceLogSize = 8192;
+
+enum class RestartPolicy : uint8_t {
+    Never,
+    OnFailure,
+    Always,
+};
+
+enum class ServiceType : uint8_t {
+    Simple,
+    Oneshot,
+};
+
+struct Service {
+    char name[service_protocol::kNameSize];
+    char description[kServiceDescriptionSize];
+    char executable[kServicePathSize];
+    char arguments[kServiceArgsSize];
+    char user[kMaxUserNameLength];
+    char after[service_protocol::kNameSize];
+    RestartPolicy restart;
+    ServiceType type;
+    bool enabled;
+    bool desired_running;
+    bool restart_requested;
+    bool completed;
+    uint32_t pid;
+    uint16_t exit_code;
+    uint32_t starts;
+    uint32_t log_handle;
+    size_t log_start;
+    size_t log_length;
+    char log[kServiceLogSize];
+};
 
 uint32_t g_console_handle = kInvalidDescriptor;
 bool g_allow_passwordless_root_bootstrap = false;
@@ -29,6 +68,11 @@ struct PrincipalCacheEntry {
 };
 
 PrincipalCacheEntry g_principals[8]{};
+Service g_services[kMaxServices]{};
+size_t g_service_count = 0;
+char g_service_response[service_protocol::kResponseTextSize];
+ProcessEvent g_pending_authorizations[32]{};
+size_t g_pending_authorization_count = 0;
 
 struct UserStoreHeader {
     uint32_t magic;
@@ -636,141 +680,497 @@ void run_login_loop() {
     }
 }
 
-bool split_spawn_target(char* line, char*& command_out, const char*& user_out) {
-    command_out = nullptr;
-    user_out = kRootUserName;
-
-    if (line == nullptr) {
-        return false;
-    }
-
-    char* command = skip_spaces(line);
-    if (command == nullptr || command[0] == '\0' || command[0] == '#') {
-        return false;
-    }
-
-    if (command[0] == '@') {
-        char* token_end = command + 1;
-        bool namespace_path = false;
-        while (*token_end != '\0' && !isspace(*token_end)) {
-            namespace_path = namespace_path || *token_end == '/';
-            ++token_end;
+bool valid_service_name(const char* name) {
+    if (name == nullptr || name[0] == '\0') return false;
+    size_t length = 0;
+    for (; name[length] != '\0'; ++length) {
+        char ch = name[length];
+        if (!((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') ||
+              (ch >= '0' && ch <= '9') || ch == '-' || ch == '_')) {
+            return false;
         }
-
-        // Volume namespaces such as @sys/binary/networkd.elf are executable
-        // paths, not the optional "@user command" principal selector.
-        if (!namespace_path) {
-            ++command;
-            char* user_end = token_end;
-            if (user_end == command) {
-                return false;
-            }
-            if (*user_end != '\0') {
-                *user_end++ = '\0';
-            }
-            user_out = command;
-            command = skip_spaces(user_end);
-            if (command == nullptr || command[0] == '\0') {
-                return false;
-            }
-        }
+        if (length + 1 >= service_protocol::kNameSize) return false;
     }
-
-    command_out = command;
-    return true;
+    return length != 0;
 }
 
-bool spawn_command_line(char* line) {
-    if (line == nullptr || line[0] == '\0') {
-        return false;
+Service* find_service(const char* name) {
+    if (name == nullptr) return nullptr;
+    for (size_t i = 0; i < g_service_count; ++i) {
+        if (strcmp(g_services[i].name, name) == 0) return &g_services[i];
     }
+    return nullptr;
+}
 
-    char* command = nullptr;
-    const char* user_name = nullptr;
-    if (!split_spawn_target(line, command, user_name)) {
-        return false;
-    }
-
-    void* principal = ensure_user_principal(user_name);
-    if (principal == nullptr) {
-        return false;
-    }
-
-    char* cursor = command;
-    while (*cursor != '\0' && !isspace(*cursor)) {
-        ++cursor;
-    }
-
-    char* args = nullptr;
-    if (*cursor != '\0') {
-        *cursor++ = '\0';
-        args = skip_spaces(cursor);
-        if (args != nullptr && args[0] == '\0') {
-            args = nullptr;
-        }
-    }
-
-    long pid = child_as(command, args, 0, nullptr, principal);
-    if (pid >= 0) {
-        print("init: spawned ");
-        print(command);
-        print("\n");
+bool parse_bool(const char* value, bool& out) {
+    if (strcmp(value, "true") == 0 || strcmp(value, "yes") == 0) {
+        out = true;
         return true;
     }
-
-    print("init: failed to spawn ");
-    print(command);
-    print("\n");
+    if (strcmp(value, "false") == 0 || strcmp(value, "no") == 0) {
+        out = false;
+        return true;
+    }
     return false;
 }
 
-bool spawn_from_config() {
-    char buffer[kConfigBufferSize];
-    size_t len = 0;
-    if (!read_file_into_buffer(kSpawnConfigPath, buffer, sizeof(buffer), len)) {
+bool parse_service_file(const char* path, const char* filename, Service& service) {
+    size_t filename_length = strlen(filename);
+    constexpr char suffix[] = ".service";
+    constexpr size_t suffix_length = sizeof(suffix) - 1;
+    if (filename_length <= suffix_length ||
+        strcmp(filename + filename_length - suffix_length, suffix) != 0 ||
+        filename_length - suffix_length >= sizeof(service.name)) {
         return false;
     }
 
-    char* lines[32];
-    size_t line_count = 0;
+    service = Service{};
+    memcpy(service.name, filename, filename_length - suffix_length);
+    service.name[filename_length - suffix_length] = '\0';
+    strlcpy(service.user, kRootUserName, sizeof(service.user));
+    service.restart = RestartPolicy::OnFailure;
+    service.log_handle = kInvalidDescriptor;
+
+    char buffer[kConfigBufferSize];
+    size_t length = 0;
+    if (!read_file_into_buffer(path, buffer, sizeof(buffer), length)) return false;
+
     char* cursor = buffer;
-    while (cursor != nullptr && *cursor != '\0' && line_count < 32) {
-        char* line_start = cursor;
-        while (*cursor != '\0' && *cursor != '\n' && *cursor != '\r') {
-            ++cursor;
-        }
-        char* line_end = cursor;
-        while (*cursor == '\n' || *cursor == '\r') {
-            *cursor = '\0';
-            ++cursor;
-        }
+    while (*cursor != '\0') {
+        char* line = cursor;
+        while (*cursor != '\0' && *cursor != '\n' && *cursor != '\r') ++cursor;
+        char* end = cursor;
+        while (*cursor == '\n' || *cursor == '\r') *cursor++ = '\0';
+        line = skip_spaces(line);
+        trim_trailing(line, end);
+        if (line == nullptr || line[0] == '\0' || line[0] == '#') continue;
 
-        char* trimmed = skip_spaces(line_start);
-        trim_trailing(trimmed, line_end);
-        if (trimmed == nullptr || trimmed[0] == '\0' || trimmed[0] == '#') {
-            continue;
+        char* equals = line;
+        while (*equals != '\0' && *equals != '=') ++equals;
+        if (*equals != '=') return false;
+        char* key_end = equals;
+        *equals++ = '\0';
+        trim_trailing(line, key_end);
+        char* value = skip_spaces(equals);
+        if (strcmp(line, "description") == 0) {
+            if (strlen(value) >= sizeof(service.description)) return false;
+            strlcpy(service.description, value, sizeof(service.description));
+        } else if (strcmp(line, "executable") == 0) {
+            if (strlen(value) >= sizeof(service.executable)) return false;
+            strlcpy(service.executable, value, sizeof(service.executable));
+        } else if (strcmp(line, "arguments") == 0) {
+            if (strlen(value) >= sizeof(service.arguments)) return false;
+            strlcpy(service.arguments, value, sizeof(service.arguments));
+        } else if (strcmp(line, "user") == 0) {
+            if (strlen(value) >= sizeof(service.user)) return false;
+            strlcpy(service.user, value, sizeof(service.user));
+        } else if (strcmp(line, "after") == 0) {
+            if (strlen(value) >= sizeof(service.after)) return false;
+            strlcpy(service.after, value, sizeof(service.after));
+        } else if (strcmp(line, "enabled") == 0) {
+            if (!parse_bool(value, service.enabled)) return false;
+        } else if (strcmp(line, "restart") == 0) {
+            if (strcmp(value, "never") == 0) service.restart = RestartPolicy::Never;
+            else if (strcmp(value, "on-failure") == 0) service.restart = RestartPolicy::OnFailure;
+            else if (strcmp(value, "always") == 0) service.restart = RestartPolicy::Always;
+            else return false;
+        } else if (strcmp(line, "type") == 0) {
+            if (strcmp(value, "simple") == 0) service.type = ServiceType::Simple;
+            else if (strcmp(value, "oneshot") == 0) service.type = ServiceType::Oneshot;
+            else return false;
+        } else {
+            return false;
         }
-        lines[line_count++] = trimmed;
     }
-
-    bool spawned_any = false;
-    for (size_t i = 0; i < line_count; ++i) {
-        if (spawn_command_line(lines[i])) {
-            spawned_any = true;
-        }
-    }
-    return spawned_any;
+    return valid_service_name(service.name) && service.executable[0] != '\0' &&
+           valid_service_name(service.user) &&
+           (service.after[0] == '\0' || valid_service_name(service.after));
 }
 
-void reap_children(void*) {
-    for (;;) {
-        // A blocking wait keeps init's service children from remaining as
-        // terminated task-table entries after they exit.
-        if (process_wait_child() < 0) {
-            // There may be no children between boot services and a later
-            // login session. Avoid turning that gap into another busy loop.
-            sleep_ms(100);
+void load_services() {
+    long directory = directory_open(kServiceDirectory);
+    if (directory < 0) {
+        print("init: no service directory found\n");
+        return;
+    }
+    DirEntry entry{};
+    while (g_service_count < kMaxServices &&
+           directory_read(static_cast<uint32_t>(directory), &entry) > 0) {
+        if ((entry.flags & DIR_ENTRY_FLAG_DIRECTORY) != 0) continue;
+        char path[256];
+        strlcpy(path, kServiceDirectory, sizeof(path));
+        strlcpy(path + strlen(path), "/", sizeof(path) - strlen(path));
+        strlcpy(path + strlen(path), entry.name, sizeof(path) - strlen(path));
+        Service parsed{};
+        if (!parse_service_file(path, entry.name, parsed)) {
+            print("init: invalid service definition ");
+            print(entry.name);
+            print("\n");
+            continue;
         }
+        if (find_service(parsed.name) != nullptr) {
+            print("init: duplicate service ");
+            print(parsed.name);
+            print("\n");
+            continue;
+        }
+        g_services[g_service_count++] = parsed;
+    }
+    directory_close(static_cast<uint32_t>(directory));
+}
+
+void append_log(Service& service, const char* data, size_t length) {
+    for (size_t i = 0; i < length; ++i) {
+        if (service.log_length < sizeof(service.log)) {
+            size_t index = (service.log_start + service.log_length) % sizeof(service.log);
+            service.log[index] = data[i];
+            ++service.log_length;
+        } else {
+            service.log[service.log_start] = data[i];
+            service.log_start = (service.log_start + 1) % sizeof(service.log);
+        }
+    }
+}
+
+void drain_service_log(Service& service) {
+    if (service.log_handle == kInvalidDescriptor) return;
+    char buffer[512];
+    for (;;) {
+        long result = descriptor_read(service.log_handle, buffer, sizeof(buffer));
+        if (result == kDescriptorWouldBlock) return;
+        if (result <= 0) {
+            descriptor_close(service.log_handle);
+            service.log_handle = kInvalidDescriptor;
+            return;
+        }
+        append_log(service, buffer, static_cast<size_t>(result));
+    }
+}
+
+bool start_service(Service& service, size_t depth = 0) {
+    if (service.pid != 0) {
+        service.desired_running = true;
+        return true;
+    }
+    if (depth >= kMaxServices) return false;
+    if (service.after[0] != '\0') {
+        Service* dependency = find_service(service.after);
+        if (dependency == nullptr || !start_service(*dependency, depth + 1)) return false;
+    }
+    void* principal = ensure_user_principal(service.user);
+    if (principal == nullptr) return false;
+
+    uint64_t read_flags = static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
+                          static_cast<uint64_t>(descriptor_defs::Flag::Async);
+    long log_reader = pipe_open_new(read_flags);
+    descriptor_defs::PipeInfo log_info{};
+    if (log_reader < 0 ||
+        pipe_get_info(static_cast<uint32_t>(log_reader), &log_info) != 0 ||
+        log_info.id == 0) return false;
+    uint64_t write_flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable);
+    long log_writer = pipe_open_existing(write_flags, log_info.id);
+    long stdin_reader = pipe_open_new(
+        static_cast<uint64_t>(descriptor_defs::Flag::Readable));
+    if (log_writer < 0 || stdin_reader < 0) {
+        descriptor_close(static_cast<uint32_t>(log_reader));
+        if (log_writer >= 0) descriptor_close(static_cast<uint32_t>(log_writer));
+        if (stdin_reader >= 0) descriptor_close(static_cast<uint32_t>(stdin_reader));
+        return false;
+    }
+    ProcessStdioConfig stdio{
+        static_cast<uint32_t>(stdin_reader),
+        static_cast<uint32_t>(log_writer),
+        static_cast<uint32_t>(log_writer),
+        0,
+    };
+    const char* args = service.arguments[0] == '\0' ? nullptr : service.arguments;
+    long pid = child_with_stdio_as(service.executable,
+                                   args,
+                                   0,
+                                   nullptr,
+                                   &stdio,
+                                   principal);
+    descriptor_close(static_cast<uint32_t>(stdin_reader));
+    descriptor_close(static_cast<uint32_t>(log_writer));
+    if (pid < 0) {
+        descriptor_close(static_cast<uint32_t>(log_reader));
+        return false;
+    }
+    service.log_handle = static_cast<uint32_t>(log_reader);
+    service.pid = static_cast<uint32_t>(pid);
+    service.desired_running = true;
+    service.restart_requested = false;
+    service.completed = false;
+    ++service.starts;
+    return true;
+}
+
+bool stop_service(Service& service, bool restart) {
+    service.desired_running = restart;
+    service.restart_requested = restart;
+    if (!restart) service.completed = false;
+    if (service.pid == 0) {
+        return restart ? start_service(service) : true;
+    }
+    return process_control(service.pid, PROCESS_CONTROL_KILL) == 0;
+}
+
+void reap_service_children() {
+    for (;;) {
+        long result = process_wait_child(0, true);
+        if (result < 0) return;
+        uint32_t pid = static_cast<uint32_t>(result) >> 16;
+        uint16_t exit_code = static_cast<uint16_t>(result);
+        Service* service = nullptr;
+        for (size_t i = 0; i < g_service_count; ++i) {
+            if (g_services[i].pid == pid) {
+                service = &g_services[i];
+                break;
+            }
+        }
+        if (service == nullptr) continue;
+        drain_service_log(*service);
+        service->pid = 0;
+        service->exit_code = exit_code;
+        service->completed = service->type == ServiceType::Oneshot &&
+                             service->desired_running &&
+                             !service->restart_requested &&
+                             exit_code == 0;
+        bool should_restart = service->restart_requested ||
+            (service->desired_running && service->restart == RestartPolicy::Always) ||
+            (service->desired_running && service->restart == RestartPolicy::OnFailure &&
+             exit_code != 0);
+        service->restart_requested = false;
+        if (!should_restart) service->desired_running = false;
+        if (should_restart) {
+            append_log(*service, "\n[init: restarting service]\n", 28);
+            (void)start_service(*service);
+        }
+    }
+}
+
+void append_text(size_t& length, const char* text) {
+    while (text != nullptr && *text != '\0' &&
+           length < sizeof(g_service_response)) {
+        g_service_response[length++] = *text++;
+    }
+}
+
+void append_uint(size_t& length, uint32_t value) {
+    char digits[11];
+    size_t count = 0;
+    do {
+        digits[count++] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    } while (value != 0);
+    while (count != 0 && length < sizeof(g_service_response)) {
+        g_service_response[length++] = digits[--count];
+    }
+}
+
+const char* service_state(const Service& service) {
+    if (service.pid != 0 && service.restart_requested) return "restarting";
+    if (service.pid != 0 && !service.desired_running) return "stopping";
+    if (service.pid != 0) return "running";
+    if (service.completed) return "completed";
+    return "stopped";
+}
+
+const char* restart_policy_name(RestartPolicy policy) {
+    if (policy == RestartPolicy::Always) return "always";
+    if (policy == RestartPolicy::OnFailure) return "on-failure";
+    return "never";
+}
+
+const char* service_type_name(ServiceType type) {
+    return type == ServiceType::Oneshot ? "oneshot" : "simple";
+}
+
+void append_service_status(size_t& length, const Service& service, bool detail) {
+    append_text(length, service.name);
+    append_text(length, ": ");
+    append_text(length, service_state(service));
+    if (service.pid != 0) {
+        append_text(length, " (pid ");
+        append_uint(length, service.pid);
+        append_text(length, ")");
+    }
+    if (detail) {
+        append_text(length, "\n  executable: ");
+        append_text(length, service.executable);
+        append_text(length, "\n  user: ");
+        append_text(length, service.user);
+        append_text(length, "\n  type: ");
+        append_text(length, service_type_name(service.type));
+        append_text(length, "\n  enabled: ");
+        append_text(length, service.enabled ? "yes" : "no");
+        append_text(length, "\n  restart: ");
+        append_text(length, restart_policy_name(service.restart));
+        if (service.after[0] != '\0') {
+            append_text(length, "\n  after: ");
+            append_text(length, service.after);
+        }
+        append_text(length, "\n  starts: ");
+        append_uint(length, service.starts);
+        append_text(length, "\n  last exit: ");
+        append_uint(length, service.exit_code);
+        if (service.description[0] != '\0') {
+            append_text(length, "\n  description: ");
+            append_text(length, service.description);
+        }
+    }
+    append_text(length, "\n");
+}
+
+void respond_to_request(const service_protocol::Request& request) {
+    int32_t status = service_protocol::kStatusOk;
+    size_t length = 0;
+    Service* service = request.service[0] == '\0' ? nullptr : find_service(request.service);
+    if (request.command == service_protocol::kList ||
+        (request.command == service_protocol::kStatus && service == nullptr &&
+         request.service[0] == '\0')) {
+        for (size_t i = 0; i < g_service_count; ++i) {
+            append_service_status(length, g_services[i], false);
+        }
+    } else if (service == nullptr) {
+        status = service_protocol::kStatusNotFound;
+        append_text(length, "service not found: ");
+        append_text(length, request.service);
+        append_text(length, "\n");
+    } else if (request.command == service_protocol::kStatus) {
+        append_service_status(length, *service, true);
+    } else if (request.command == service_protocol::kStart) {
+        if (!start_service(*service)) status = service_protocol::kStatusFailed;
+        append_service_status(length, *service, false);
+    } else if (request.command == service_protocol::kStop) {
+        if (!stop_service(*service, false)) status = service_protocol::kStatusFailed;
+        append_service_status(length, *service, false);
+    } else if (request.command == service_protocol::kRestart) {
+        if (!stop_service(*service, true)) status = service_protocol::kStatusFailed;
+        append_service_status(length, *service, false);
+    } else if (request.command == service_protocol::kLogs) {
+        if (service->log_length == 0) {
+            append_text(length, "(no output)\n");
+        } else {
+            for (size_t i = 0; i < service->log_length &&
+                               length < sizeof(g_service_response); ++i) {
+                g_service_response[length++] =
+                    service->log[(service->log_start + i) % sizeof(service->log)];
+            }
+        }
+    } else {
+        status = service_protocol::kStatusInvalid;
+        append_text(length, "invalid service command\n");
+    }
+
+    uint64_t flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable);
+    long reply = pipe_open_existing(flags, request.reply_pipe_id);
+    if (reply < 0) return;
+    service_protocol::ResponseHeader header{
+        service_protocol::kMessageMagic,
+        service_protocol::kMessageVersion,
+        0,
+        status,
+        static_cast<uint32_t>(length),
+    };
+    (void)service_protocol::write_all(static_cast<uint32_t>(reply), &header, sizeof(header));
+    if (length != 0) {
+        (void)service_protocol::write_all(static_cast<uint32_t>(reply),
+                                          g_service_response,
+                                          length);
+    }
+    descriptor_close(static_cast<uint32_t>(reply));
+}
+
+bool authorize_request(const service_protocol::Request& request) {
+    uint64_t expected = service_protocol::request_authorization(request);
+    for (size_t i = 0; i < g_pending_authorization_count; ++i) {
+        const ProcessEvent& event = g_pending_authorizations[i];
+        if (event.type == service_protocol::kAuthorizationEvent &&
+            event.sender_process_id == request.client_process_id &&
+            event.value == expected) {
+            for (size_t j = i + 1; j < g_pending_authorization_count; ++j) {
+                g_pending_authorizations[j - 1] = g_pending_authorizations[j];
+            }
+            --g_pending_authorization_count;
+            return true;
+        }
+    }
+    for (;;) {
+        ProcessEvent event{};
+        long result = process_event_receive(&event, true);
+        if (result != 0) return false;
+        if (result == 0 &&
+            event.type == service_protocol::kAuthorizationEvent &&
+            event.sender_process_id == request.client_process_id &&
+            event.value == expected) {
+            return true;
+        }
+        if (event.type == service_protocol::kAuthorizationEvent) {
+            if (g_pending_authorization_count ==
+                sizeof(g_pending_authorizations) / sizeof(g_pending_authorizations[0])) {
+                for (size_t i = 1; i < g_pending_authorization_count; ++i) {
+                    g_pending_authorizations[i - 1] = g_pending_authorizations[i];
+                }
+                --g_pending_authorization_count;
+            }
+            g_pending_authorizations[g_pending_authorization_count++] = event;
+        }
+    }
+}
+
+void service_manager(void*) {
+    uint64_t server_flags = static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
+                            static_cast<uint64_t>(descriptor_defs::Flag::Async);
+    long server = pipe_open_new(server_flags);
+    descriptor_defs::PipeInfo pipe_info{};
+    if (server < 0 ||
+        pipe_get_info(static_cast<uint32_t>(server), &pipe_info) != 0 ||
+        pipe_info.id == 0) {
+        print("init: failed to create service control pipe\n");
+        return;
+    }
+    long registry_handle = shared_memory_open(service_protocol::kRegistryName,
+                                               sizeof(service_protocol::Registry));
+    descriptor_defs::SharedMemoryInfo registry_info{};
+    if (registry_handle < 0 ||
+        shared_memory_get_info(static_cast<uint32_t>(registry_handle),
+                               &registry_info) != 0 ||
+        registry_info.base == 0 ||
+        registry_info.length < sizeof(service_protocol::Registry)) {
+        print("init: failed to publish service manager\n");
+        return;
+    }
+    auto* registry = reinterpret_cast<service_protocol::Registry*>(registry_info.base);
+    *registry = service_protocol::Registry{
+        service_protocol::kRegistryMagic,
+        service_protocol::kRegistryVersion,
+        pipe_info.id,
+        process_id(),
+    };
+
+    for (size_t i = 0; i < g_service_count; ++i) {
+        if (g_services[i].enabled) (void)start_service(g_services[i]);
+    }
+
+    for (;;) {
+        for (size_t i = 0; i < g_service_count; ++i) drain_service_log(g_services[i]);
+        reap_service_children();
+        service_protocol::Request request{};
+        if (service_protocol::read_all(static_cast<uint32_t>(server),
+                                       &request,
+                                       sizeof(request),
+                                       false) &&
+            request.magic == service_protocol::kMessageMagic &&
+            request.version == service_protocol::kMessageVersion &&
+            request.reply_pipe_id != 0 &&
+            request.client_process_id != 0) {
+            request.service[sizeof(request.service) - 1] = '\0';
+            if (authorize_request(request)) {
+                respond_to_request(request);
+            }
+        }
+        sleep_ms(10);
     }
 }
 
@@ -797,9 +1197,9 @@ int main(uint64_t, uint64_t) {
             sleep_ns(1000000000ull);
         }
     }
-    if (thread_create(reap_children, nullptr) < 0) {
-        print("init: failed to start child reaper\n");
+    load_services();
+    if (thread_create(service_manager, nullptr) < 0) {
+        print("init: failed to start service manager\n");
     }
-    (void)spawn_from_config();
     run_login_loop();
 }

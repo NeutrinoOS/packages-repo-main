@@ -1,5 +1,5 @@
 [base-system]
-version = "1.0.1"
+version = "1.1.0"
 strategy = "over_root"
 description = "Neutrino init, shell, and desktop session"
 depends = []
