@@ -1,5 +1,5 @@
 [coreutils]
-version = "0.1.0"
+version = "0.1.1"
 strategy = "over_root"
 description = "Core Neutrino file and shell utilities"
 depends = ["base-system"]
