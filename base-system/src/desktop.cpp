@@ -641,7 +641,8 @@ void handle_mouse(uint32_t mouse) {
     long bytes = descriptor_read(mouse, events, sizeof(events));
     if (bytes <= 0) return;
     size_t count = static_cast<size_t>(bytes) / sizeof(events[0]);
-    Rect damage{g_cursor_x, g_cursor_y, kCursorWidth, kCursorHeight};
+    Rect old_cursor{g_cursor_x, g_cursor_y, kCursorWidth, kCursorHeight};
+    Rect damage{};
     for (size_t i = 0; i < count; ++i) {
         g_cursor_x += events[i].dx;
         g_cursor_y -= events[i].dy;
@@ -734,8 +735,21 @@ void handle_mouse(uint32_t mouse) {
         }
         g_previous_buttons = events[i].buttons;
     }
-    damage = unite(damage, {g_cursor_x, g_cursor_y, kCursorWidth, kCursorHeight});
-    render(damage);
+    Rect new_cursor{g_cursor_x, g_cursor_y, kCursorWidth, kCursorHeight};
+    if (damage.width > 0 && damage.height > 0) {
+        render(unite(unite(damage, old_cursor), new_cursor));
+        return;
+    }
+
+    // Repainting the bounding box of an entire batch makes diagonal pointer
+    // movement increasingly expensive as the cursor travels farther.  At high
+    // fullscreen resolutions that can starve input processing, while purely
+    // horizontal or vertical movement only repaints a thin strip.  Restore the
+    // old cursor area and draw the new one as two small regions instead.
+    render(old_cursor);
+    if (old_cursor.x != new_cursor.x || old_cursor.y != new_cursor.y) {
+        render(new_cursor);
+    }
 }
 
 bool initialize_server(uint32_t& pipe_out, uint32_t& registry_out) {
