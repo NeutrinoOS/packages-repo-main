@@ -50,7 +50,50 @@ struct Args {
     char device[64];
     char label[16];
     char preferred_alias[32];
+    uint64_t metadata_size;
+    uint32_t metadata_percent;
+    bool metadata_percent_set;
+    bool force;
+    bool dry_run;
+    bool quiet;
+    bool verbose;
+    bool show_help;
+    bool show_version;
 };
+
+bool strings_equal(const char* a, const char* b) {
+    return a != nullptr && b != nullptr && strcmp(a, b) == 0;
+}
+
+bool parse_u64(const char* text, uint64_t& out) {
+    if (text == nullptr || *text == '\0') return false;
+    uint64_t value = 0;
+    while (*text >= '0' && *text <= '9') {
+        uint64_t digit = static_cast<uint64_t>(*text - '0');
+        if (value > (UINT64_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+        ++text;
+    }
+    uint64_t multiplier = 1;
+    if (*text != '\0') {
+        char suffix = *text++;
+        if (suffix >= 'a' && suffix <= 'z') suffix -= 'a' - 'A';
+        if (suffix == 'K') multiplier = 1024ull;
+        else if (suffix == 'M') multiplier = 1024ull * 1024ull;
+        else if (suffix == 'G') multiplier = 1024ull * 1024ull * 1024ull;
+        else if (suffix == 'T') multiplier = 1024ull * 1024ull * 1024ull * 1024ull;
+        else return false;
+        if (*text == 'i' || *text == 'I') ++text;
+        if (*text == 'b' || *text == 'B') ++text;
+    }
+    if (*text != '\0' || value > UINT64_MAX / multiplier) return false;
+    out = value * multiplier;
+    return true;
+}
+
+bool copy_option_value(const char*& cursor, char* out, size_t out_size) {
+    return userspace::copy_token(cursor, out, out_size);
+}
 
 bool valid_alias(const char* alias) {
     if (alias == nullptr || alias[0] == '\0') return true;
@@ -77,7 +120,9 @@ bool valid_alias(const char* alias) {
     return true;
 }
 
-void print_progress(long console, const char* action, uint64_t done, uint64_t total) {
+void print_progress(long console, const char* action, uint64_t done,
+                    uint64_t total, bool quiet) {
+    if (quiet) return;
     uint64_t percent = total == 0 ? 100 : (done * 100) / total;
     constexpr uint64_t mib = 1024ull * 1024ull;
     userspace::write(console, "mkneufs: ");
@@ -93,36 +138,71 @@ void print_progress(long console, const char* action, uint64_t done, uint64_t to
 
 bool parse_args(const char* raw, Args& out) {
     memset(&out, 0, sizeof(out));
-    if (raw == nullptr || raw[0] == '\0') {
-        return false;
-    }
-
+    out.metadata_percent = 225;  // hundredths of one percent (2.25%).
     const char* cursor = raw;
-    if (!userspace::copy_token(cursor, out.device, sizeof(out.device))) {
-        return false;
-    }
-
-    const char* after_device = userspace::skip_spaces(cursor);
-    if (after_device != nullptr && *after_device != '\0') {
-        cursor = after_device;
-        if (!userspace::copy_token(cursor, out.label, sizeof(out.label))) {
-            return false;
-        }
-        cursor = userspace::skip_spaces(cursor);
-        if (cursor != nullptr && *cursor != '\0') {
-            if (!userspace::copy_token(cursor, out.preferred_alias,
-                                       sizeof(out.preferred_alias))) {
+    char token[64];
+    size_t positional = 0;
+    bool options = true;
+    while (userspace::copy_token(cursor, token, sizeof(token))) {
+        if (options && strings_equal(token, "--")) {
+            options = false;
+        } else if (options && (strings_equal(token, "-h") ||
+                               strings_equal(token, "--help"))) {
+            out.show_help = true;
+        } else if (options && (strings_equal(token, "-V") ||
+                               strings_equal(token, "--version"))) {
+            out.show_version = true;
+        } else if (options && (strings_equal(token, "-f") ||
+                               strings_equal(token, "--force"))) {
+            out.force = true;
+        } else if (options && (strings_equal(token, "-n") ||
+                               strings_equal(token, "--dry-run"))) {
+            out.dry_run = true;
+        } else if (options && (strings_equal(token, "-q") ||
+                               strings_equal(token, "--quiet"))) {
+            out.quiet = true;
+        } else if (options && (strings_equal(token, "-v") ||
+                               strings_equal(token, "--verbose"))) {
+            out.verbose = true;
+        } else if (options && (strings_equal(token, "-L") ||
+                               strings_equal(token, "--label"))) {
+            if (!copy_option_value(cursor, out.label, sizeof(out.label))) return false;
+        } else if (options && (strings_equal(token, "-A") ||
+                               strings_equal(token, "--alias"))) {
+            if (!copy_option_value(cursor, out.preferred_alias,
+                                   sizeof(out.preferred_alias))) return false;
+        } else if (options && (strings_equal(token, "-m") ||
+                               strings_equal(token, "--metadata-size"))) {
+            char value[32];
+            if (!copy_option_value(cursor, value, sizeof(value)) ||
+                !parse_u64(value, out.metadata_size) || out.metadata_size == 0) {
                 return false;
             }
-            cursor = userspace::skip_spaces(cursor);
+        } else if (options && strings_equal(token, "--metadata-percent")) {
+            char value[16];
+            uint64_t parsed = 0;
+            if (!copy_option_value(cursor, value, sizeof(value)) ||
+                !parse_u64(value, parsed) || parsed == 0 || parsed > 99) return false;
+            out.metadata_percent = static_cast<uint32_t>(parsed * 100);
+            out.metadata_percent_set = true;
+        } else if (options && token[0] == '-') {
+            return false;
+        } else if (out.device[0] == '\0') {
+            memcpy(out.device, token, strlen(token) + 1);
+        } else if (positional == 0 && out.label[0] == '\0') {
+            memcpy(out.label, token, strlen(token) + 1);
+            ++positional;
+        } else if (positional <= 1 && out.preferred_alias[0] == '\0') {
+            memcpy(out.preferred_alias, token, strlen(token) + 1);
+            ++positional;
+        } else {
+            return false;
         }
-        return (cursor == nullptr || *cursor == '\0') &&
-               valid_alias(out.preferred_alias);
     }
-
-    const char* default_label = "neufs";
-    memcpy(out.label, default_label, strlen(default_label) + 1);
-    return true;
+    if (out.show_help || out.show_version) return true;
+    if (out.device[0] == '\0') return false;
+    if (out.label[0] == '\0') memcpy(out.label, "neufs", 6);
+    return valid_alias(out.preferred_alias);
 }
 
 uint64_t align_up(uint64_t value, uint64_t alignment) {
@@ -133,8 +213,9 @@ uint64_t align_up(uint64_t value, uint64_t alignment) {
     return rem == 0 ? value : value + (alignment - rem);
 }
 
-uint64_t default_meta_size(uint64_t total_bytes, uint64_t sector_size) {
-    uint64_t suggested = (total_bytes * 225) / 10000;
+uint64_t default_meta_size(uint64_t total_bytes, uint64_t sector_size,
+                           uint32_t hundredths_percent) {
+    uint64_t suggested = (total_bytes / 10000) * hundredths_percent;
     const uint64_t min_meta = 256ull * 1024ull * 1024ull;
     const uint64_t max_meta = 16ull * 1024ull * 1024ull * 1024ull;
     if (suggested < min_meta && total_bytes >= min_meta * 2) {
@@ -149,6 +230,35 @@ uint64_t default_meta_size(uint64_t total_bytes, uint64_t sector_size) {
         suggested = total_bytes;
     }
     return align_up(suggested, sector_size);
+}
+
+long read_exact(uint32_t handle, void* buffer, size_t length, uint64_t offset);
+
+void print_help(long console) {
+    userspace::write_line(console, "usage: mkneufs [options] <block-device> [label [alias]]");
+    userspace::write_line(console, "Create a NEUFS v2 filesystem.");
+    userspace::write_line(console, "  -L, --label NAME          set volume label (max 15 characters)");
+    userspace::write_line(console, "  -A, --alias NAME          set preferred @ namespace alias");
+    userspace::write_line(console, "  -m, --metadata-size SIZE  set metadata area (K/M/G/T suffixes allowed)");
+    userspace::write_line(console, "      --metadata-percent N  use N percent of the device for metadata");
+    userspace::write_line(console, "  -n, --dry-run             validate and print layout without writing");
+    userspace::write_line(console, "  -f, --force               overwrite a recognized existing filesystem");
+    userspace::write_line(console, "  -q, --quiet               suppress normal output");
+    userspace::write_line(console, "  -v, --verbose             print additional layout information");
+    userspace::write_line(console, "  -h, --help                display this help");
+    userspace::write_line(console, "  -V, --version             display version");
+}
+
+bool has_filesystem_signature(uint32_t handle, uint64_t sector_size) {
+    if (sector_size < 512 || sector_size > 4096) return false;
+    uint8_t sector[4096];
+    if (read_exact(handle, sector, static_cast<size_t>(sector_size), 0) !=
+        static_cast<long>(sector_size)) return false;
+    if (memcmp(sector, kNeufsMagic, sizeof(kNeufsMagic)) == 0) return true;
+    if (memcmp(sector + 82, "FAT32   ", 8) == 0 ||
+        memcmp(sector + 54, "FAT16   ", 8) == 0 ||
+        memcmp(sector + 54, "FAT12   ", 8) == 0) return true;
+    return false;
 }
 
 long read_exact(uint32_t handle, void* buffer, size_t length, uint64_t offset) {
@@ -181,14 +291,15 @@ bool zero_region(long console,
                  uint64_t offset,
                  uint64_t size,
                  uint8_t* scratch,
-                 uint64_t scratch_size) {
+                 uint64_t scratch_size,
+                 bool quiet) {
     uint64_t total_size = size;
     uint64_t done = 0;
     constexpr uint64_t progress_step = 1024ull * 1024ull;
     uint64_t next_progress = progress_step;
 
     memset(scratch, 0, static_cast<size_t>(scratch_size));
-    print_progress(console, "clearing metadata", 0, total_size);
+    print_progress(console, "clearing metadata", 0, total_size, quiet);
     while (size > 0) {
         uint64_t chunk = size < scratch_size ? size : scratch_size;
         if (write_exact(handle,
@@ -202,7 +313,7 @@ bool zero_region(long console,
         done += chunk;
 
         if (done >= next_progress || size == 0) {
-            print_progress(console, "clearing metadata", done, total_size);
+            print_progress(console, "clearing metadata", done, total_size, quiet);
             while (next_progress <= done) {
                 next_progress += progress_step;
             }
@@ -302,8 +413,25 @@ bool format_neufs(long console,
         return false;
     }
 
+    if (geom.sector_count > UINT64_MAX / geom.sector_size) {
+        userspace::write_line(console, "mkneufs: block geometry overflows address space");
+        return false;
+    }
     uint64_t total_bytes = geom.sector_size * geom.sector_count;
-    uint64_t meta_size = default_meta_size(total_bytes, geom.sector_size);
+    if (args.metadata_size != 0 &&
+        args.metadata_size > total_bytes - (geom.sector_size - 1)) {
+        userspace::write_line(console, "mkneufs: requested metadata area is too large");
+        return false;
+    }
+    uint64_t meta_size = args.metadata_size != 0
+                             ? align_up(args.metadata_size, geom.sector_size)
+                             : args.metadata_percent_set
+                                   ? align_up((total_bytes / 100) *
+                                                  (args.metadata_percent / 100),
+                                              geom.sector_size)
+                                   : default_meta_size(total_bytes,
+                                                       geom.sector_size,
+                                                       args.metadata_percent);
     if (meta_size >= total_bytes) {
         userspace::write_line(console, "mkneufs: device too small for spec default metadata area");
         return false;
@@ -322,6 +450,19 @@ bool format_neufs(long console,
         return false;
     }
 
+    if (args.dry_run) {
+        userspace::write(console, "mkneufs: would format ");
+        userspace::write(console, args.device);
+        userspace::write(console, " as NEUFS v2; sectors=");
+        userspace::write_u64(console, geom.sector_count);
+        userspace::write(console, " sector_size=");
+        userspace::write_u64(console, geom.sector_size);
+        userspace::write(console, " metadata_bytes=");
+        userspace::write_u64(console, meta_size);
+        userspace::write_line(console, "");
+        return true;
+    }
+
     uint64_t sectors_per_write = 255;
     uint64_t scratch_size = geom.sector_size * sectors_per_write;
     uint8_t* sector = static_cast<uint8_t*>(
@@ -331,13 +472,14 @@ bool format_neufs(long console,
         return false;
     }
 
-    if (!zero_region(console, handle, 0, meta_size, sector, scratch_size)) {
+    if (!zero_region(console, handle, 0, meta_size, sector, scratch_size,
+                     args.quiet)) {
         userspace::write_line(console, "mkneufs: failed to clear metadata area");
         unmap(sector, static_cast<size_t>(scratch_size));
         return false;
     }
 
-    userspace::write_line(console, "mkneufs: writing RVT");
+    if (!args.quiet) userspace::write_line(console, "mkneufs: writing RVT");
     NeufsRvt rvt{};
     for (size_t i = 0; i < sizeof(kNeufsMagic); ++i) {
         rvt.magic[i] = static_cast<char>(kNeufsMagic[i]);
@@ -353,7 +495,7 @@ bool format_neufs(long console,
         return false;
     }
 
-    userspace::write_line(console, "mkneufs: writing root directory");
+    if (!args.quiet) userspace::write_line(console, "mkneufs: writing root directory");
     NeufsNdir root{};
     root.type = kTypeNdir;
     root.name[0] = '/';
@@ -371,7 +513,7 @@ bool format_neufs(long console,
 
     uint64_t used_data_sectors = align_up(meta_size, geom.sector_size) /
                                  geom.sector_size;
-    userspace::write_line(console, "mkneufs: initializing data bitmap");
+    if (!args.quiet) userspace::write_line(console, "mkneufs: initializing data bitmap");
     if (!bitmap_set_range(sector,
                           handle,
                           data_bitmap_offset,
@@ -387,7 +529,7 @@ bool format_neufs(long console,
     uint64_t data_bitmap_blocks = align_up(data_bitmap_size, 8) / 8;
     uint64_t meta_bitmap_blocks = align_up(meta_bitmap_size, 8) / 8;
     uint64_t root_blocks = align_up(sizeof(NeufsNdir), 8) / 8;
-    userspace::write_line(console, "mkneufs: initializing metadata bitmap");
+    if (!args.quiet) userspace::write_line(console, "mkneufs: initializing metadata bitmap");
     if (!bitmap_set_range(sector, handle, meta_bitmap_offset, 0,
                           rvt_blocks, geom.sector_size) ||
         !bitmap_set_range(sector, handle, meta_bitmap_offset,
@@ -409,6 +551,7 @@ bool format_neufs(long console,
 
     unmap(sector, static_cast<size_t>(scratch_size));
 
+    if (args.quiet) return true;
     userspace::write(console, "mkneufs: formatted ");
     userspace::write(console, args.device);
     userspace::write(console, " label=");
@@ -426,6 +569,13 @@ bool format_neufs(long console,
     userspace::write(console, " root=");
     userspace::write_u64(console, root_offset);
     userspace::write_line(console, "");
+    if (args.verbose) {
+        userspace::write(console, "mkneufs: data_bitmap=");
+        userspace::write_u64(console, data_bitmap_offset);
+        userspace::write(console, " metadata_bitmap=");
+        userspace::write_u64(console, meta_bitmap_offset);
+        userspace::write_line(console, "");
+    }
     return true;
 }
 
@@ -440,11 +590,17 @@ int main(uint64_t arg_ptr, uint64_t) {
     Args args{};
     const char* raw = reinterpret_cast<const char*>(arg_ptr);
     if (!parse_args(raw, args)) {
-        userspace::write_line(console,
-                              "usage: mkneufs <block-device> [label] [alias]");
-        userspace::write_line(console,
-                              "example: mkneufs IDE_SM_0 scratch data");
+        userspace::write_line(console, "mkneufs: invalid arguments");
+        userspace::write_line(console, "Try 'mkneufs --help' for more information.");
         return 1;
+    }
+    if (args.show_help) {
+        print_help(console);
+        return 0;
+    }
+    if (args.show_version) {
+        userspace::write_line(console, "mkneufs (system-tools) 1.4.0");
+        return 0;
     }
 
     long device = descriptor_open(
@@ -459,7 +615,8 @@ int main(uint64_t arg_ptr, uint64_t) {
         return 1;
     }
 
-    if (descriptor_test_flag(static_cast<uint32_t>(device),
+    if (!args.dry_run &&
+        descriptor_test_flag(static_cast<uint32_t>(device),
                              static_cast<uint64_t>(
                                  descriptor_defs::Flag::Writable)) != 1) {
         userspace::write_line(console, "mkneufs: block device is not writable");
@@ -474,6 +631,15 @@ int main(uint64_t arg_ptr, uint64_t) {
             &geom,
             sizeof(geom)) != 0) {
         userspace::write_line(console, "mkneufs: failed to query block geometry");
+        descriptor_close(static_cast<uint32_t>(device));
+        return 1;
+    }
+
+    if (!args.force &&
+        has_filesystem_signature(static_cast<uint32_t>(device),
+                                 geom.sector_size)) {
+        userspace::write_line(console,
+                              "mkneufs: existing filesystem signature found; use --force to overwrite");
         descriptor_close(static_cast<uint32_t>(device));
         return 1;
     }
