@@ -25,7 +25,7 @@ LEGACY_LIBC_OBJECTS := $(patsubst $(SUPPORT_ROOT)/%.cpp,$(BUILD_DIR)/legacy/supp
 PACKAGE_ROOT := $(BUILD_DIR)/pkgroot
 PACKAGE_ZIP := $(OUT_DIR)/$(PACKAGE).zip
 CFLAGS ?= -O2 -g -ffreestanding -fno-builtin -fno-stack-protector -nostdlib -m64 -mno-red-zone -mno-avx -mno-avx512f -fPIE -std=c11 -Wall -Wextra -Wpedantic -isystem $(NEUTRINO_SYSROOT)/include -isystem $(NEUTRINO_TARGET_ROOT)/include
-CXXFLAGS ?= -std=c++20 -ffreestanding -fno-builtin -fno-stack-protector -nostdlib -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-avx -mno-avx512f -fPIE -pie -Wall -Wextra -I$(SUPPORT_ROOT)/helpers -I$(SUPPORT_ROOT)/crt -I$(SUPPORT_ROOT)/libc/include -I$(NEUTRINO_ROOT)/shared/include
+CXXFLAGS ?= -std=c++20 -O2 -ffreestanding -fno-builtin -fno-stack-protector -nostdlib -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-avx -mno-avx512f -fPIE -pie -Wall -Wextra -I$(SUPPORT_ROOT)/helpers -I$(SUPPORT_ROOT)/crt -I$(SUPPORT_ROOT)/libc/include -I$(NEUTRINO_ROOT)/shared/include
 .PHONY: all package clean
 all: $(PROGRAM_TARGETS)
 $(addprefix $(OUT_DIR)/,$(addsuffix .elf,$(C_PROGRAMS))): $(OUT_DIR)/%.elf: $(BUILD_DIR)/newlib/%.o $(NEWLIB_FILES) | $(OUT_DIR)

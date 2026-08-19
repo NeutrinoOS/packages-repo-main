@@ -1,5 +1,5 @@
 [sdl2]
-version = "0.1.5"
+version = "0.1.10"
 strategy = "over_root"
 description = "SDL2 with native Neutrino desktop, framebuffer, keyboard, and audio drivers"
 depends = []

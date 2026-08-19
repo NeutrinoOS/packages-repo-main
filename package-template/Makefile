@@ -34,7 +34,7 @@ PACKAGE_ROOT := $(BUILD_DIR)/pkgroot
 PACKAGE_ZIP := $(OUT_DIR)/$(PROGRAM).zip
 
 ASFLAGS ?= -f elf64
-CXXFLAGS ?= -std=c++20 -ffreestanding -fno-builtin -fno-stack-protector \
+CXXFLAGS ?= -std=c++20 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
             -nostdlib -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
             -mno-avx -mno-avx512f -fPIE -pie -Wall -Wextra \
             -I$(INCLUDE_DIR)
