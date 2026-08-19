@@ -82,7 +82,7 @@ struct UserStoreHeader {
     uint32_t count;
 };
 
-struct UserStoreHeaderV3 {
+struct UserStoreHeaderCurrent {
     uint32_t magic;
     uint16_t version;
     uint16_t entry_size;
@@ -122,7 +122,7 @@ struct LoginUsers {
 };
 
 constexpr size_t kUserStoreBufferSize =
-    sizeof(UserStoreHeaderV3) +
+    sizeof(UserStoreHeaderCurrent) +
     sizeof(PackedUser) * kMaxLoginUsers + 1;
 constexpr uint32_t kMaxPasswordIterations =
     auth::kPasswordIterations * 10u;
@@ -397,21 +397,21 @@ bool load_login_users(LoginUsers& users,
     }
     bool current_v2 = header.version == 2 &&
                       header.entry_size == sizeof(PackedUser);
-    bool current_v3 = header.version == 3 &&
-                      header.entry_size == sizeof(PackedUser);
+    bool current = header.version == 4 &&
+                   header.entry_size == sizeof(PackedUser);
     bool legacy = header.version == 1 &&
                   header.entry_size == sizeof(PackedUserV1);
-    if (!current_v2 && !current_v3 && !legacy) {
+    if (!current_v2 && !current && !legacy) {
         return false;
     }
 
     size_t available = 0;
     size_t count = header.count;
-    if (current_v3) {
-        if (len < sizeof(UserStoreHeaderV3)) {
+    if (current) {
+        if (len < sizeof(UserStoreHeaderCurrent)) {
             return false;
         }
-        available = (len - sizeof(UserStoreHeaderV3)) / header.entry_size;
+        available = (len - sizeof(UserStoreHeaderCurrent)) / header.entry_size;
     } else {
         available = (len - sizeof(UserStoreHeader)) / header.entry_size;
     }
@@ -421,7 +421,7 @@ bool load_login_users(LoginUsers& users,
     if (count > kMaxLoginUsers) {
         return false;
     }
-    if (out_explicit_empty != nullptr && current_v3 && header.count == 0) {
+    if (out_explicit_empty != nullptr && current && header.count == 0) {
         *out_explicit_empty = true;
     }
 
@@ -444,7 +444,7 @@ bool load_login_users(LoginUsers& users,
         }
     } else {
         const PackedUser* entries = reinterpret_cast<const PackedUser*>(
-            buffer + (current_v3 ? sizeof(UserStoreHeaderV3) : sizeof(UserStoreHeader)));
+            buffer + (current ? sizeof(UserStoreHeaderCurrent) : sizeof(UserStoreHeader)));
         for (size_t i = 0; i < count; ++i) {
             if (entries[i].active == 0) {
                 continue;
