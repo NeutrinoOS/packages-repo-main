@@ -1,0 +1,5 @@
+[terminal]
+version = "0.2.0"
+strategy = "over_root"
+description = "Graphical VTY terminal for the Neutrino desktop"
+depends = ["base-system", "neutrino-ui"]
