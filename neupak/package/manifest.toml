@@ -1,5 +1,5 @@
 [neupak]
-version = "1.0.1"
+version = "1.2.0"
 strategy = "over_root"
 description = "Neutrino package manager and secure download helper"
-depends = ["base-system", "bearssl", "ca-certificates"]
+depends = ["base-system", "bearssl", "ca-certificates", "libnet"]

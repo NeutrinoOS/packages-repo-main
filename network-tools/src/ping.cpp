@@ -3,6 +3,7 @@
 
 #include "../crt/syscall.hpp"
 #include "../net/network_protocol.hpp"
+#include "../net/service.hpp"
 
 namespace {
 
@@ -286,16 +287,21 @@ extern "C" int main(uint64_t arg_ptr, uint64_t) {
 
     uint32_t registry_handle = 0;
     networkd_protocol::Registry* registry = nullptr;
-    if (!open_registry(registry_handle, registry)) {
-        print("ping: failed to open network registry reason=");
-        print_u32(static_cast<uint32_t>(g_registry_fail_reason));
-        print("\n");
-        return 1;
-    }
-    while (registry->magic != networkd_protocol::kRegistryMagic ||
-           registry->version != networkd_protocol::kRegistryVersion ||
-           registry->server_pipe_id == 0) {
-        yield();
+    uint32_t network_pipe_id = 0;
+    if (!service::lookup_pipe(service::kNetworkService, service::kAbiV1,
+                              network_pipe_id)) {
+        if (!open_registry(registry_handle, registry)) {
+            print("ping: failed to open network registry reason=");
+            print_u32(static_cast<uint32_t>(g_registry_fail_reason));
+            print("\n");
+            return 1;
+        }
+        while (registry->magic != networkd_protocol::kRegistryMagic ||
+               registry->version != networkd_protocol::kRegistryVersion ||
+               registry->server_pipe_id == 0) {
+            yield();
+        }
+        network_pipe_id = registry->server_pipe_id;
     }
 
     uint64_t reply_flags = static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
@@ -321,7 +327,7 @@ extern "C" int main(uint64_t arg_ptr, uint64_t) {
 
     uint64_t server_flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
                             static_cast<uint64_t>(descriptor_defs::Flag::Async);
-    long server_pipe = pipe_open_existing(server_flags, registry->server_pipe_id);
+    long server_pipe = pipe_open_existing(server_flags, network_pipe_id);
     if (server_pipe < 0) {
         print_line("ping: failed to open networkd pipe");
         return 1;

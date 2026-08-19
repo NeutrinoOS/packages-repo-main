@@ -1,5 +1,5 @@
 [httpserver]
-version = "1.0.2"
+version = "1.2.0"
 strategy = "over_root"
 description = "Small HTTP file server for the current working directory"
-depends = ["base-system", "network-services"]
+depends = ["base-system", "network-services", "libnet"]

@@ -1,0 +1,5 @@
+[libnet]
+version = "1.0.0"
+strategy = "over_root"
+description = "Shared Neutrino networking and HTTP client/server library"
+depends = ["base-system", "network-services"]

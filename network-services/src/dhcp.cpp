@@ -2,7 +2,9 @@
 #include <stdint.h>
 
 #include "../crt/syscall.hpp"
+#include "../net/dhcp_protocol.hpp"
 #include "../net/network_protocol.hpp"
+#include "../net/service.hpp"
 #include "../net/udp.hpp"
 
 namespace {
@@ -560,10 +562,13 @@ uint32_t make_xid(const uint8_t mac[6]) {
            static_cast<uint32_t>(mac[5]);
 }
 
+void lease_from_ack(const DhcpReply& ack, dhcp_protocol::Lease& lease);
+
 bool attempt_dhcp(uint32_t server_pipe,
                   uint32_t reply_pipe,
                   usernet::Device& device,
-                  networkd_protocol::Registry* registry) {
+                  networkd_protocol::Registry* registry,
+                  dhcp_protocol::Lease& lease) {
     uint32_t xid = make_xid(device.info.mac);
     if (registry != nullptr) {
         registry->dhcp_state = networkd_protocol::kStateDiscoverSent;
@@ -707,7 +712,49 @@ bool attempt_dhcp(uint32_t server_pipe,
     if (registry != nullptr) {
         registry->dhcp_state = networkd_protocol::kStateLeaseApplied;
     }
+    lease_from_ack(ack, lease);
     return true;
+}
+
+void lease_from_ack(const DhcpReply& ack, dhcp_protocol::Lease& lease) {
+    lease.status = dhcp_protocol::kStatusOk;
+    for (size_t i = 0; i < 4; ++i) {
+        lease.address[i] = ack.yiaddr[i];
+        lease.mask[i] = ack.subnet_mask[i];
+        lease.router[i] = ack.router[i];
+        lease.dns[i] = ack.dns[i];
+        lease.server[i] = ack.server_id[i];
+    }
+    if (lease.mask[0] == 0 && lease.mask[1] == 0 &&
+        lease.mask[2] == 0 && lease.mask[3] == 0) {
+        lease.mask[0] = 255;
+        lease.mask[1] = 255;
+        lease.mask[2] = 255;
+        lease.mask[3] = 0;
+    }
+    lease.reserved = 0;
+}
+
+void poll_dhcp_control(uint32_t server_pipe, const dhcp_protocol::Lease& lease) {
+    dhcp_protocol::Message message{};
+    if (!dhcp_protocol::read_message(server_pipe, message)) {
+        return;
+    }
+    if (message.type != dhcp_protocol::kGetLeaseRequest ||
+        message.get_lease_request.reply_pipe_id == 0) {
+        return;
+    }
+    uint64_t flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
+                     static_cast<uint64_t>(descriptor_defs::Flag::Async);
+    long reply = pipe_open_existing(flags, message.get_lease_request.reply_pipe_id);
+    if (reply < 0) {
+        return;
+    }
+    dhcp_protocol::Message response{};
+    dhcp_protocol::init_message(response, dhcp_protocol::kGetLeaseResponse);
+    response.lease = lease;
+    (void)dhcp_protocol::write_message(static_cast<uint32_t>(reply), response);
+    descriptor_close(static_cast<uint32_t>(reply));
 }
 
 }  // namespace
@@ -734,14 +781,21 @@ int main(uint64_t, uint64_t) {
 
     uint32_t registry_handle = 0;
     networkd_protocol::Registry* registry = nullptr;
+    uint32_t network_pipe_id = 0;
+    const bool have_service =
+        service::lookup_pipe(service::kNetworkService, service::kAbiV1,
+                             network_pipe_id);
     if (!open_registry(registry_handle, registry)) {
         print_line("dhcp: failed to open network registry");
         return 320 + g_registry_fail_reason;
     }
     while (registry->magic != networkd_protocol::kRegistryMagic ||
            registry->version != networkd_protocol::kRegistryVersion ||
-           registry->server_pipe_id == 0) {
+           (!have_service && registry->server_pipe_id == 0)) {
         yield();
+    }
+    if (!have_service) {
+        network_pipe_id = registry->server_pipe_id;
     }
     registry->dhcp_state = networkd_protocol::kStateStarting;
     registry->dhcp_attempts = 0;
@@ -783,7 +837,7 @@ int main(uint64_t, uint64_t) {
     uint64_t server_flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
                             static_cast<uint64_t>(descriptor_defs::Flag::Async);
     long server_pipe =
-        pipe_open_existing(server_flags, registry->server_pipe_id);
+        pipe_open_existing(server_flags, network_pipe_id);
     if (server_pipe < 0) {
         registry->dhcp_state = networkd_protocol::kStateError;
         registry->dhcp_last_error = networkd_protocol::kErrorOpenServerPipe;
@@ -792,7 +846,7 @@ int main(uint64_t, uint64_t) {
     }
     registry->dhcp_state = networkd_protocol::kStateServerPipeOpen;
     print("dhcp: server pipe id=");
-    print_u32(registry->server_pipe_id);
+    print_u32(network_pipe_id);
     print("\n");
 
     if (!bind_udp(static_cast<uint32_t>(server_pipe), reply_pipe_id, kDhcpClientPort)) {
@@ -826,6 +880,7 @@ int main(uint64_t, uint64_t) {
     registry->dhcp_state = networkd_protocol::kStateBound;
 
     bool waiting_for_link_reported = false;
+    dhcp_protocol::Lease lease{};
     for (;;) {
         if (net_device_get_info(device.handle, &device.info) == 0 &&
             (device.info.flags & descriptor_defs::kNetDeviceFlagUp) != 0) {
@@ -833,15 +888,18 @@ int main(uint64_t, uint64_t) {
             if (attempt_dhcp(static_cast<uint32_t>(server_pipe),
                              static_cast<uint32_t>(reply_pipe),
                              device,
-                             registry)) {
+                             registry,
+                             lease)) {
                 print_line("dhcp: lease applied");
-                return 0;
+                break;
             }
             for (size_t i = 0; i < kDhcpRetryBackoffYields; ++i) {
                 yield();
             }
         } else {
-            registry->dhcp_state = networkd_protocol::kStateWaitingLink;
+            if (registry != nullptr) {
+                registry->dhcp_state = networkd_protocol::kStateWaitingLink;
+            }
             if (!waiting_for_link_reported) {
                 print_line("dhcp: waiting for link");
                 waiting_for_link_reported = true;
@@ -850,5 +908,36 @@ int main(uint64_t, uint64_t) {
         for (size_t i = 0; i < 200; ++i) {
             yield();
         }
+    }
+
+    uint64_t dhcp_flags = static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
+                          static_cast<uint64_t>(descriptor_defs::Flag::Async);
+    long dhcp_pipe = pipe_open_new(dhcp_flags);
+    auto* dhcp_info = allocate_pipe_info_buffer();
+    if (dhcp_pipe < 0 || dhcp_info == nullptr) {
+        print_line("dhcp: failed to create DHCP ABI pipe");
+        return 38;
+    }
+    long dhcp_info_result = pipe_get_info(static_cast<uint32_t>(dhcp_pipe), dhcp_info);
+    uint32_t dhcp_pipe_id = dhcp_info->id;
+    unmap(dhcp_info, sizeof(*dhcp_info));
+    if (dhcp_info_result != 0 || dhcp_pipe_id == 0) {
+        print_line("dhcp: failed to query DHCP ABI pipe");
+        return 38;
+    }
+    long registrar = service_registrar_open();
+    if (registrar < 0 ||
+        !service::advertise(static_cast<uint32_t>(registrar),
+                            service::kDhcpService,
+                            service::kAbiV1,
+                            dhcp_pipe_id,
+                            "dhcp")) {
+        print_line("dhcp: failed to register DHCP ABI");
+        return 39;
+    }
+    print_line("dhcp: serving DHCP ABI");
+    for (;;) {
+        poll_dhcp_control(static_cast<uint32_t>(dhcp_pipe), lease);
+        yield();
     }
 }

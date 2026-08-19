@@ -1025,6 +1025,61 @@ static inline long pipe_open_existing(uint64_t flags, uint64_t pipe_id) {
         0);
 }
 
+static inline long service_registrar_open() {
+    return descriptor_open(
+        static_cast<uint32_t>(descriptor_defs::Type::ServiceRegistry),
+        0,
+        0,
+        0);
+}
+
+static inline long service_lookup_open(const char* service, uint32_t abi_version) {
+    return descriptor_open(
+        static_cast<uint32_t>(descriptor_defs::Type::ServiceRegistry),
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(service)),
+        static_cast<uint64_t>(abi_version),
+        0);
+}
+
+static inline long service_register_offer(
+    uint32_t handle,
+    const descriptor_defs::ServiceOffer* offer) {
+    if (offer == nullptr) {
+        return -1;
+    }
+    return descriptor_set_property(
+        handle,
+        static_cast<uint32_t>(descriptor_defs::Property::ServiceRegister),
+        offer,
+        sizeof(*offer));
+}
+
+static inline long service_unregister_offer(
+    uint32_t handle,
+    const descriptor_defs::ServiceQuery* query) {
+    if (query == nullptr) {
+        return -1;
+    }
+    return descriptor_set_property(
+        handle,
+        static_cast<uint32_t>(descriptor_defs::Property::ServiceUnregister),
+        query,
+        sizeof(*query));
+}
+
+static inline long service_get_binding(
+    uint32_t handle,
+    descriptor_defs::ServiceBinding* binding) {
+    if (binding == nullptr) {
+        return -1;
+    }
+    return descriptor_get_property(
+        handle,
+        static_cast<uint32_t>(descriptor_defs::Property::ServiceBinding),
+        binding,
+        sizeof(*binding));
+}
+
 static inline long pipe_get_info(uint32_t handle,
                                  descriptor_defs::PipeInfo* info) {
     if (info == nullptr) {

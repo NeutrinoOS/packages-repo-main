@@ -5,6 +5,7 @@
 
 #include "../crt/syscall.hpp"
 #include "network_protocol.hpp"
+#include "service.hpp"
 #include "udp.hpp"
 
 namespace usernet::dns {
@@ -256,7 +257,7 @@ inline uint16_t hash_host(const char* host) {
     return hash;
 }
 
-inline uint16_t make_query_id(const char* host) {
+static inline uint16_t make_query_id(const char* host) {
     static uint16_t sequence = 0;
     sequence = static_cast<uint16_t>(sequence + 1);
     uint16_t hash = hash_host(host);
@@ -401,22 +402,27 @@ inline bool parse_response(const uint8_t* message,
 }
 
 inline bool prepare_context(ResolverContext& ctx) {
-    networkd_protocol::Registry* registry = nullptr;
-    if (!open_registry(ctx.network_registry_handle, registry)) {
-        g_last_status = ResolveStatus::NetworkRegistryUnavailable;
-        return false;
-    }
-    for (size_t spins = 0;
-         registry->magic != networkd_protocol::kRegistryMagic ||
-         registry->version != networkd_protocol::kRegistryVersion ||
-         registry->server_pipe_id == 0;
-         ++spins) {
-        if (spins >= kRegistryPollSpins) {
-            close_context(ctx);
-            g_last_status = ResolveStatus::NetworkRegistryTimeout;
+    uint32_t server_pipe_id = 0;
+    if (!service::lookup_pipe(service::kNetworkService, service::kAbiV1,
+                              server_pipe_id, kRegistryPollSpins)) {
+        networkd_protocol::Registry* registry = nullptr;
+        if (!open_registry(ctx.network_registry_handle, registry)) {
+            g_last_status = ResolveStatus::NetworkRegistryUnavailable;
             return false;
         }
-        yield();
+        for (size_t spins = 0;
+             registry->magic != networkd_protocol::kRegistryMagic ||
+             registry->version != networkd_protocol::kRegistryVersion ||
+             registry->server_pipe_id == 0;
+             ++spins) {
+            if (spins >= kRegistryPollSpins) {
+                close_context(ctx);
+                g_last_status = ResolveStatus::NetworkRegistryTimeout;
+                return false;
+            }
+            yield();
+        }
+        server_pipe_id = registry->server_pipe_id;
     }
 
     long device_handle = net_device_open(0);
@@ -450,7 +456,7 @@ inline bool prepare_context(ResolverContext& ctx) {
 
     uint64_t server_flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
                             static_cast<uint64_t>(descriptor_defs::Flag::Async);
-    long server_pipe = pipe_open_existing(server_flags, registry->server_pipe_id);
+    long server_pipe = pipe_open_existing(server_flags, server_pipe_id);
     if (server_pipe < 0) {
         close_context(ctx);
         g_last_status = ResolveStatus::ServerPipeUnavailable;

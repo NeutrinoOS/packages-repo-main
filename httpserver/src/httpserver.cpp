@@ -4,7 +4,8 @@
 
 #include "../crt/syscall.hpp"
 #include "../helpers/args.hpp"
-#include "../net/tcpd_protocol.hpp"
+#include "../helpers/http.hpp"
+#include "../net/libnet.hpp"
 
 namespace {
 
@@ -90,40 +91,6 @@ bool parse_arguments(const char* args, uint16_t& port) {
            parse_port(value, port);
 }
 
-bool open_tcpd_registry(uint32_t& handle, tcpd_protocol::Registry*& registry) {
-    long result = shared_memory_open(tcpd_protocol::kRegistryName,
-                                     sizeof(tcpd_protocol::Registry));
-    if (result < 0) {
-        return false;
-    }
-    descriptor_defs::SharedMemoryInfo info{};
-    if (shared_memory_get_info(static_cast<uint32_t>(result), &info) != 0 ||
-        info.base == 0 || info.length < sizeof(tcpd_protocol::Registry)) {
-        descriptor_close(static_cast<uint32_t>(result));
-        return false;
-    }
-    handle = static_cast<uint32_t>(result);
-    registry = reinterpret_cast<tcpd_protocol::Registry*>(info.base);
-    return true;
-}
-
-bool send_listen_request(uint32_t server_pipe, uint32_t reply_pipe_id, uint16_t port) {
-    tcpd_protocol::Message message{};
-    tcpd_protocol::init_message(message, tcpd_protocol::kListenRequest);
-    message.listen_request.reply_pipe_id = reply_pipe_id;
-    message.listen_request.port = port;
-    return tcpd_protocol::write_message(server_pipe, message);
-}
-
-Connection* find_connection(Connection* connections, uint32_t id) {
-    for (size_t i = 0; i < kMaxConnections; ++i) {
-        if (connections[i].in_use && connections[i].id == id) {
-            return &connections[i];
-        }
-    }
-    return nullptr;
-}
-
 Connection* allocate_connection(Connection* connections) {
     for (size_t i = 0; i < kMaxConnections; ++i) {
         if (!connections[i].in_use) {
@@ -195,16 +162,6 @@ bool append_u64(char* output, size_t capacity, size_t& length, uint64_t value) {
     return true;
 }
 
-char* find_char(char* text, char needle) {
-    while (text != nullptr && *text != '\0') {
-        if (*text == needle) {
-            return text;
-        }
-        ++text;
-    }
-    return nullptr;
-}
-
 bool send_header(uint32_t endpoint,
                  const char* status,
                  const char* content_type,
@@ -229,32 +186,16 @@ void send_error(uint32_t endpoint, const char* status, const char* body, bool he
     }
 }
 
-int hex_value(char ch) {
-    if (ch >= '0' && ch <= '9') return ch - '0';
-    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
-    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
-    return -1;
-}
-
 bool safe_path_from_target(const char* target, size_t target_length, char* output) {
     if (target_length == 0 || target[0] != '/') {
         return false;
     }
+    char decoded[kMaxPathBytes];
+    size_t decoded_length = userspace::http::percent_decode(
+        target + 1, target_length - 1, decoded, sizeof(decoded));
     size_t out_length = 0;
-    for (size_t i = 1; i < target_length && target[i] != '?' && target[i] != '#'; ++i) {
-        unsigned char ch = static_cast<unsigned char>(target[i]);
-        if (ch == '%') {
-            if (i + 2 >= target_length) {
-                return false;
-            }
-            int high = hex_value(target[i + 1]);
-            int low = hex_value(target[i + 2]);
-            if (high < 0 || low < 0) {
-                return false;
-            }
-            ch = static_cast<unsigned char>((high << 4) | low);
-            i += 2;
-        }
+    for (size_t i = 0; i < decoded_length && decoded[i] != '?' && decoded[i] != '#'; ++i) {
+        unsigned char ch = static_cast<unsigned char>(decoded[i]);
         if (ch == 0 || ch == '\\' || ch < 0x20 || ch == 0x7f ||
             out_length + 1 >= kMaxPathBytes) {
             return false;
@@ -327,26 +268,19 @@ void serve_request(Connection& connection) {
         return;
     }
     *line_end = '\0';
-    char* method_end = find_char(connection.request, ' ');
-    if (method_end == nullptr) {
+    userspace::http::Request parsed{};
+    if (!userspace::http::parse_request_line(connection.request, parsed)) {
         send_error(connection.endpoint, "400 Bad Request", "Bad Request\n", false);
         return;
     }
-    *method_end = '\0';
-    bool head_only = strcmp(connection.request, "HEAD") == 0;
-    if (strcmp(connection.request, "GET") != 0 && !head_only) {
+    bool head_only = strcmp(parsed.method, "HEAD") == 0;
+    if (strcmp(parsed.method, "GET") != 0 && !head_only) {
         send_error(connection.endpoint, "405 Method Not Allowed", "Method Not Allowed\n", false);
         return;
     }
-    char* target = method_end + 1;
-    char* target_end = find_char(target, ' ');
-    if (target_end == nullptr || target_end[1] == '\0') {
-        send_error(connection.endpoint, "400 Bad Request", "Bad Request\n", head_only);
-        return;
-    }
-    size_t target_length = static_cast<size_t>(target_end - target);
+    size_t target_length = strlen(parsed.target);
     char path[kMaxPathBytes];
-    if (!safe_path_from_target(target, target_length, path)) {
+    if (!safe_path_from_target(parsed.target, target_length, path)) {
         send_error(connection.endpoint, "403 Forbidden", "Forbidden\n", head_only);
         return;
     }
@@ -438,44 +372,9 @@ int main(uint64_t arg_ptr, uint64_t) {
         return 1;
     }
 
-    uint32_t registry_handle = 0;
-    tcpd_protocol::Registry* registry = nullptr;
-    if (!open_tcpd_registry(registry_handle, registry)) {
-        print("httpserver: tcpd registry is unavailable\n");
-        return 1;
-    }
-    while (registry->magic != tcpd_protocol::kRegistryMagic ||
-           registry->version != tcpd_protocol::kRegistryVersion ||
-           registry->server_pipe_id == 0 || registry->state != tcpd_protocol::kStateReady) {
-        yield();
-    }
-
-    uint64_t reply_flags = static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
-                           static_cast<uint64_t>(descriptor_defs::Flag::Async);
-    long reply_pipe = pipe_open_new(reply_flags);
-    descriptor_defs::PipeInfo reply_info{};
-    if (reply_pipe < 0 ||
-        pipe_get_info(static_cast<uint32_t>(reply_pipe), &reply_info) != 0 ||
-        reply_info.id == 0) {
-        print("httpserver: failed to create reply pipe\n");
-        return 1;
-    }
-    uint64_t server_flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
-                            static_cast<uint64_t>(descriptor_defs::Flag::Async);
-    long server_pipe = pipe_open_existing(server_flags, registry->server_pipe_id);
-    if (server_pipe < 0 ||
-        !send_listen_request(static_cast<uint32_t>(server_pipe), reply_info.id, port)) {
-        print("httpserver: failed to request TCP listener\n");
-        return 1;
-    }
-
-    tcpd_protocol::Message response{};
-    while (!tcpd_protocol::read_message(static_cast<uint32_t>(reply_pipe), response)) {
-        yield();
-    }
-    if (response.type != tcpd_protocol::kListenResponse ||
-        response.listen_response.status != tcpd_protocol::kStatusOk) {
-        print("httpserver: port is unavailable\n");
+    net::Listener listener{};
+    if (!net::listen(listener, port)) {
+        print("httpserver: TCP service is unavailable\n");
         return 1;
     }
     print("httpserver: serving the current directory on port ");
@@ -486,10 +385,10 @@ int main(uint64_t arg_ptr, uint64_t) {
     descriptor_defs::DescriptorWait waits[kMaxConnections + 1]{};
     for (;;) {
         poll_connections(connections);
-        tcpd_protocol::Message event{};
-        if (!tcpd_protocol::read_message(static_cast<uint32_t>(reply_pipe), event)) {
+        net::Connection accepted{};
+        if (!net::accept(listener, accepted)) {
             size_t wait_count = 0;
-            waits[wait_count].handle = static_cast<uint32_t>(reply_pipe);
+            waits[wait_count].handle = listener.reply_pipe;
             waits[wait_count].events = descriptor_defs::kWaitRead;
             waits[wait_count].revents = 0;
             waits[wait_count].reserved = 0;
@@ -510,32 +409,16 @@ int main(uint64_t arg_ptr, uint64_t) {
             }
             continue;
         }
-        if (event.type == tcpd_protocol::kAcceptEvent) {
-            Connection* connection = allocate_connection(connections);
-            if (connection == nullptr || event.accept_event.endpoint_id == 0) {
-                continue;
-            }
-            uint64_t endpoint_flags =
-                static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
-                static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
-                static_cast<uint64_t>(descriptor_defs::Flag::Async);
-            long endpoint = net_endpoint_open_existing(endpoint_flags,
-                                                       event.accept_event.endpoint_id);
-            if (endpoint >= 0) {
-                connection->in_use = true;
-                connection->id = event.accept_event.connection_id;
-                connection->endpoint = static_cast<uint32_t>(endpoint);
-                connection->request_length = 0;
-                connection->request[0] = '\0';
-            }
+        Connection* connection = allocate_connection(connections);
+        if (connection == nullptr) {
+            net::close_connection(accepted);
             continue;
         }
-        if (event.type == tcpd_protocol::kClosedEvent) {
-            Connection* connection = find_connection(connections,
-                                                     event.closed_event.connection_id);
-            if (connection != nullptr) {
-                release_connection(*connection);
-            }
-        }
+        connection->in_use = true;
+        connection->id = accepted.connection_id;
+        connection->endpoint = accepted.endpoint;
+        accepted.endpoint = 0;
+        connection->request_length = 0;
+        connection->request[0] = '\0';
     }
 }

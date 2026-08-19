@@ -13,6 +13,9 @@ constexpr uint32_t kRegistryMagic = 0x4E455457u;  // "NETW"
 // New diagnostics are appended to Registry so v3 readers retain a stable
 // prefix and can coexist with newer daemons in the same page-sized segment.
 constexpr uint32_t kRegistryVersion = 3;
+// Diagnostic shared-memory name. Consumers should look up
+// service::kNetworkService instead of depending on this provider-specific
+// segment.
 constexpr const char kRegistryName[] = "network.registry";
 
 constexpr uint32_t kMessageMagic = 0x4E455450u;  // "NETP"
@@ -255,7 +258,7 @@ inline void init_message(Message& message, uint16_t type) {
     message.type = type;
 }
 
-inline bool write_message(uint32_t handle, const Message& message) {
+static inline bool write_message(uint32_t handle, const Message& message) {
     static Message* bounce = nullptr;
     if (bounce == nullptr) {
         bounce = static_cast<Message*>(
@@ -291,7 +294,7 @@ inline bool write_message(uint32_t handle, const Message& message) {
     return true;
 }
 
-inline bool read_message(uint32_t handle, Message& message) {
+static inline bool read_message(uint32_t handle, Message& message) {
     static Message* bounce = nullptr;
     if (bounce == nullptr) {
         bounce = static_cast<Message*>(

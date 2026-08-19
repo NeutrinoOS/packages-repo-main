@@ -1,5 +1,5 @@
 [neutrino-live]
-version = "1.2.0"
+version = "1.3.0"
 strategy = "over_root"
 description = "Complete userspace installed by the Neutrino live environment"
-depends = ["base-system", "desktop", "doom", "ffmpeg", "bearssl", "coreutils", "neupak", "network-services", "network-tools", "system-tools", "text-tools", "console-tools", "editor-tools"]
+depends = ["base-system", "desktop", "doom", "ffmpeg", "bearssl", "coreutils", "neupak", "network-services", "network-tools", "system-tools", "text-tools", "console-tools", "editor-tools", "libnet"]

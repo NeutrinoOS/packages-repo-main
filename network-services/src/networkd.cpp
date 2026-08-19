@@ -5,6 +5,7 @@
 #include "../crt/syscall.hpp"
 #include "../net/ipv4.hpp"
 #include "../net/network_protocol.hpp"
+#include "../net/service.hpp"
 #include "../net/tcp.hpp"
 #include "../net/udp.hpp"
 
@@ -937,6 +938,16 @@ int main(uint64_t, uint64_t) {
     print_line("networkd: registry published");
     ctx.registry->networkd_state = networkd_protocol::kStateReady;
 
+    long registrar = service_registrar_open();
+    if (registrar < 0 ||
+        !service::advertise(static_cast<uint32_t>(registrar),
+                            service::kNetworkService,
+                            service::kAbiV1,
+                            server_pipe_id,
+                            "networkd")) {
+        print_line("networkd: failed to register Network ABI");
+        return 15;
+    }
     print_line("networkd: ready");
 
     for (;;) {

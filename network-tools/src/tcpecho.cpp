@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include "../crt/syscall.hpp"
+#include "../net/libnet.hpp"
 #include "../net/tcpd_protocol.hpp"
 
 namespace {
@@ -199,52 +200,13 @@ int main(uint64_t arg_ptr, uint64_t) {
         return 1;
     }
 
-    uint32_t registry_handle = 0;
-    tcpd_protocol::Registry* registry = nullptr;
-    if (!open_tcpd_registry(registry_handle, registry)) {
-        print_line("tcpecho: failed to open tcpd registry");
-        return 1;
-    }
-    while (registry->magic != tcpd_protocol::kRegistryMagic ||
-           registry->version != tcpd_protocol::kRegistryVersion ||
-           registry->server_pipe_id == 0) {
-        yield();
-    }
-
-    uint64_t reply_flags = static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
-                           static_cast<uint64_t>(descriptor_defs::Flag::Async);
-    long reply_pipe = pipe_open_new(reply_flags);
-    if (reply_pipe < 0) {
-        print_line("tcpecho: failed to create reply pipe");
-        return 1;
-    }
-    descriptor_defs::PipeInfo info{};
-    if (pipe_get_info(static_cast<uint32_t>(reply_pipe), &info) != 0 || info.id == 0) {
-        print_line("tcpecho: failed to query reply pipe");
-        return 1;
-    }
-
-    uint64_t server_flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
-                            static_cast<uint64_t>(descriptor_defs::Flag::Async);
-    long server_pipe = pipe_open_existing(server_flags, registry->server_pipe_id);
-    if (server_pipe < 0) {
-        print_line("tcpecho: failed to open tcpd pipe");
-        return 1;
-    }
-    if (!send_listen_request(static_cast<uint32_t>(server_pipe), info.id, port)) {
-        print_line("tcpecho: failed to send listen request");
-        return 1;
-    }
-
-    tcpd_protocol::Message message{};
-    while (!tcpd_protocol::read_message(static_cast<uint32_t>(reply_pipe), message)) {
-        yield();
-    }
-    if (message.type != tcpd_protocol::kListenResponse ||
-        message.listen_response.status != tcpd_protocol::kStatusOk) {
+    net::Listener listener{};
+    if (!net::listen(listener, port)) {
         print_line("tcpecho: listen failed");
         return 1;
     }
+    uint32_t reply_pipe = listener.reply_pipe;
+    uint32_t server_pipe = listener.server_pipe;
 
     print("tcpecho: listening on ");
     print_u32(port);

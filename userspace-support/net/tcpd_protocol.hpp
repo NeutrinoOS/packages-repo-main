@@ -12,6 +12,8 @@ namespace tcpd_protocol {
 
 constexpr uint32_t kRegistryMagic = 0x54435044u;  // "TCPD"
 constexpr uint32_t kRegistryVersion = 1;
+// Diagnostic shared-memory name. Consumers should look up
+// service::kTcpService instead of depending on this provider-specific segment.
 constexpr const char kRegistryName[] = "tcp.registry";
 
 constexpr uint32_t kMessageMagic = 0x54435050u;  // "TCPP"
@@ -163,7 +165,7 @@ inline void init_message(Message& message, uint16_t type) {
     message.type = type;
 }
 
-inline bool write_message(uint32_t handle, const Message& message) {
+static inline bool write_message(uint32_t handle, const Message& message) {
     static Message* bounce = nullptr;
     if (bounce == nullptr) {
         bounce = static_cast<Message*>(
@@ -199,7 +201,7 @@ inline bool write_message(uint32_t handle, const Message& message) {
     return true;
 }
 
-inline bool read_message(uint32_t handle, Message& message) {
+static inline bool read_message(uint32_t handle, Message& message) {
     static Message* bounce = nullptr;
     if (bounce == nullptr) {
         bounce = static_cast<Message*>(

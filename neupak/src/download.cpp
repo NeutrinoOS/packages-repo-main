@@ -9,7 +9,7 @@
 #include "../auth/secure_random.hpp"
 #include "../helpers/http.hpp"
 #include "../net/dns.hpp"
-#include "../net/tcpd_protocol.hpp"
+#include "../net/libnet.hpp"
 
 namespace {
 
@@ -23,16 +23,7 @@ constexpr uint64_t kReadTimeoutNs = 30000000000ull;
 constexpr uint32_t kMaxRedirects = 5;
 constexpr uint32_t kNetDebugDeviceIndex = 0;
 
-struct TcpConnection {
-    uint32_t server_pipe = 0;
-    uint32_t reply_pipe = 0;
-    uint32_t endpoint = 0;
-    uint32_t connection_id = 0;
-    bool closed = false;
-    uint8_t pending[tcpd_protocol::kMaxPayload];
-    size_t pending_offset = 0;
-    size_t pending_length = 0;
-};
+using TcpConnection = net::Connection;
 
 struct Buffer {
     uint8_t* data = nullptr;
@@ -487,288 +478,24 @@ void append_port(char* out, size_t out_size, uint16_t port) {
     out[length] = '\0';
 }
 
-bool open_tcpd_registry(uint32_t& handle, tcpd_protocol::Registry*& registry) {
-    long shm = shared_memory_open(tcpd_protocol::kRegistryName,
-                                  sizeof(tcpd_protocol::Registry));
-    if (shm < 0) {
-        return false;
-    }
-    descriptor_defs::SharedMemoryInfo info{};
-    if (shared_memory_get_info(static_cast<uint32_t>(shm), &info) != 0 ||
-        info.base == 0 ||
-        info.length < sizeof(tcpd_protocol::Registry)) {
-        descriptor_close(static_cast<uint32_t>(shm));
-        return false;
-    }
-    handle = static_cast<uint32_t>(shm);
-    registry = reinterpret_cast<tcpd_protocol::Registry*>(info.base);
-    return true;
-}
-
-bool send_connect_request(uint32_t server_handle,
-                          uint32_t reply_pipe_id,
-                          uint32_t endpoint_id,
-                          const uint8_t ip[4],
-                          uint16_t port) {
-    tcpd_protocol::Message message{};
-    tcpd_protocol::init_message(message, tcpd_protocol::kConnectRequest);
-    message.connect_request.reply_pipe_id = reply_pipe_id;
-    message.connect_request.remote_port = port;
-    message.connect_request.endpoint_id = endpoint_id;
-    for (size_t i = 0; i < 4; ++i) {
-        message.connect_request.remote_ip[i] = ip[i];
-    }
-    return tcpd_protocol::write_message(server_handle, message);
-}
-
-bool send_close_request(uint32_t server_handle, uint32_t connection_id) {
-    tcpd_protocol::Message message{};
-    tcpd_protocol::init_message(message, tcpd_protocol::kCloseRequest);
-    message.close_request.connection_id = connection_id;
-    return tcpd_protocol::write_message(server_handle, message);
-}
-
-bool send_payload(uint32_t server_handle,
-                  uint32_t connection_id,
-                  const uint8_t* payload,
-                  size_t payload_length) {
-    if (payload_length > tcpd_protocol::kMaxPayload) {
-        return false;
-    }
-    tcpd_protocol::Message message{};
-    tcpd_protocol::init_message(message, tcpd_protocol::kSendRequest);
-    message.send_request.connection_id = connection_id;
-    message.send_request.payload_length = static_cast<uint16_t>(payload_length);
-    for (size_t i = 0; i < payload_length; ++i) {
-        message.send_request.payload[i] = payload[i];
-    }
-    return tcpd_protocol::write_message(server_handle, message);
-}
-
 bool tcp_connect(TcpConnection& conn, const uint8_t ip[4], uint16_t port) {
-    uint32_t registry_handle = 0;
-    tcpd_protocol::Registry* registry = nullptr;
-    if (!open_tcpd_registry(registry_handle, registry)) {
-        print_line("download: failed to open tcpd registry");
+    if (!net::connect_ip(conn, ip, port)) {
+        print_line("download: failed to connect through TCP service");
         return false;
     }
-    uint64_t registry_start = wall_time_ns();
-    uint32_t registry_waits = 0;
-    while (registry->magic != tcpd_protocol::kRegistryMagic ||
-           registry->version != tcpd_protocol::kRegistryVersion ||
-           registry->server_pipe_id == 0) {
-        if (timed_out(registry_start,
-                      kConnectTimeoutNs,
-                      registry_waits++,
-                      kConnectWaitLimit)) {
-            descriptor_close(registry_handle);
-            print_line("download: tcpd registry timeout");
-            return false;
-        }
-        yield();
-    }
-    uint32_t server_pipe_id = registry->server_pipe_id;
-    descriptor_close(registry_handle);
-
-    uint64_t reply_flags = static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
-                           static_cast<uint64_t>(descriptor_defs::Flag::Async);
-    long reply_pipe = pipe_open_new(reply_flags);
-    if (reply_pipe < 0) {
-        print_line("download: failed to create reply pipe");
-        return false;
-    }
-    descriptor_defs::PipeInfo reply_info{};
-    if (pipe_get_info(static_cast<uint32_t>(reply_pipe), &reply_info) != 0 ||
-        reply_info.id == 0) {
-        descriptor_close(static_cast<uint32_t>(reply_pipe));
-        return false;
-    }
-
-    uint64_t server_flags = static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
-                            static_cast<uint64_t>(descriptor_defs::Flag::Async);
-    long server_pipe = pipe_open_existing(server_flags, server_pipe_id);
-    if (server_pipe < 0) {
-        descriptor_close(static_cast<uint32_t>(reply_pipe));
-        print_line("download: failed to open tcpd pipe");
-        return false;
-    }
-
-    long endpoint =
-        net_endpoint_open_new(static_cast<uint64_t>(descriptor_defs::Flag::Async));
-    if (endpoint < 0) {
-        descriptor_close(static_cast<uint32_t>(reply_pipe));
-        descriptor_close(static_cast<uint32_t>(server_pipe));
-        print_line("download: failed to create endpoint");
-        return false;
-    }
-    descriptor_defs::NetEndpointInfo endpoint_info{};
-    if (net_endpoint_get_info(static_cast<uint32_t>(endpoint), &endpoint_info) != 0 ||
-        endpoint_info.id == 0) {
-        descriptor_close(static_cast<uint32_t>(endpoint));
-        descriptor_close(static_cast<uint32_t>(reply_pipe));
-        descriptor_close(static_cast<uint32_t>(server_pipe));
-        print_line("download: failed to query endpoint");
-        return false;
-    }
-
-    if (!send_connect_request(static_cast<uint32_t>(server_pipe),
-                              reply_info.id,
-                              endpoint_info.id,
-                              ip,
-                              port)) {
-        descriptor_close(static_cast<uint32_t>(endpoint));
-        descriptor_close(static_cast<uint32_t>(reply_pipe));
-        descriptor_close(static_cast<uint32_t>(server_pipe));
-        print_line("download: failed to send connect request");
-        return false;
-    }
-
-    uint32_t connect_waits = 0;
-    uint64_t connect_start = wall_time_ns();
-    for (;;) {
-        tcpd_protocol::Message message{};
-        if (!tcpd_protocol::read_message(static_cast<uint32_t>(reply_pipe), message)) {
-            if (timed_out(connect_start,
-                          kConnectTimeoutNs,
-                          connect_waits++,
-                          kConnectWaitLimit)) {
-                descriptor_close(static_cast<uint32_t>(endpoint));
-                descriptor_close(static_cast<uint32_t>(reply_pipe));
-                descriptor_close(static_cast<uint32_t>(server_pipe));
-                print_line("download: tcp connect timeout");
-                return false;
-            }
-            yield();
-            continue;
-        }
-        if (message.type != tcpd_protocol::kConnectResponse) {
-            continue;
-        }
-        if (message.connect_response.status != tcpd_protocol::kStatusOk) {
-            descriptor_close(static_cast<uint32_t>(endpoint));
-            descriptor_close(static_cast<uint32_t>(reply_pipe));
-            descriptor_close(static_cast<uint32_t>(server_pipe));
-            print_line("download: tcp connect failed");
-            return false;
-        }
-        conn.server_pipe = static_cast<uint32_t>(server_pipe);
-        conn.reply_pipe = static_cast<uint32_t>(reply_pipe);
-        conn.endpoint = static_cast<uint32_t>(endpoint);
-        conn.connection_id = message.connect_response.connection_id;
-        conn.closed = false;
-        conn.pending_offset = 0;
-        conn.pending_length = 0;
-        return true;
-    }
+    return true;
 }
 
 void tcp_close(TcpConnection& conn) {
-    if (conn.server_pipe != 0 && conn.connection_id != 0) {
-        (void)send_close_request(conn.server_pipe, conn.connection_id);
-    }
-    if (conn.reply_pipe != 0) {
-        descriptor_close(conn.reply_pipe);
-    }
-    if (conn.endpoint != 0) {
-        descriptor_close(conn.endpoint);
-    }
-    if (conn.server_pipe != 0) {
-        descriptor_close(conn.server_pipe);
-    }
-    conn.server_pipe = 0;
-    conn.reply_pipe = 0;
-    conn.endpoint = 0;
-    conn.connection_id = 0;
-    conn.closed = true;
-    conn.pending_offset = 0;
-    conn.pending_length = 0;
+    net::close_connection(conn);
 }
 
 bool tcp_send_all(TcpConnection& conn, const uint8_t* data, size_t length) {
-    size_t offset = 0;
-    while (offset < length) {
-        size_t chunk = length - offset;
-        if (chunk > tcpd_protocol::kMaxPayload) {
-            chunk = tcpd_protocol::kMaxPayload;
-        }
-        if (!send_payload(conn.server_pipe, conn.connection_id, data + offset, chunk)) {
-            return false;
-        }
-        offset += chunk;
-    }
-    return true;
+    return net::write(conn, data, length);
 }
 
 int tcp_read_some(TcpConnection& conn, uint8_t* out, size_t capacity) {
-    if (capacity == 0) {
-        return 0;
-    }
-    if (conn.endpoint != 0) {
-        uint32_t read_waits = 0;
-        uint64_t read_start = wall_time_ns();
-        for (;;) {
-            long result = descriptor_read(conn.endpoint, out, capacity);
-            if (result == kDescriptorWouldBlock) {
-                if (timed_out(read_start,
-                              kReadTimeoutNs,
-                              read_waits++,
-                              kReadWaitLimit)) {
-                    print_line("download: tcp read timeout");
-                    return -1;
-                }
-                yield();
-                continue;
-            }
-            if (result == 0) {
-                conn.closed = true;
-                return -1;
-            }
-            if (result < 0) {
-                return -1;
-            }
-            return static_cast<int>(result);
-        }
-    }
-    uint32_t read_waits = 0;
-    uint64_t read_start = wall_time_ns();
-    while (conn.pending_offset == conn.pending_length) {
-        if (conn.closed) {
-            return -1;
-        }
-        tcpd_protocol::Message message{};
-        if (!tcpd_protocol::read_message(conn.reply_pipe, message)) {
-            if (timed_out(read_start,
-                          kReadTimeoutNs,
-                          read_waits++,
-                          kReadWaitLimit)) {
-                print_line("download: tcp read timeout");
-                return -1;
-            }
-            yield();
-            continue;
-        }
-        read_waits = 0;
-        read_start = wall_time_ns();
-        if (message.type == tcpd_protocol::kDataEvent &&
-            message.data_event.connection_id == conn.connection_id) {
-            conn.pending_offset = 0;
-            conn.pending_length = message.data_event.payload_length;
-            memcpy(conn.pending, message.data_event.payload, conn.pending_length);
-            break;
-        }
-        if (message.type == tcpd_protocol::kClosedEvent &&
-            message.closed_event.connection_id == conn.connection_id) {
-            conn.closed = true;
-            return -1;
-        }
-    }
-    size_t available = conn.pending_length - conn.pending_offset;
-    if (available > capacity) {
-        available = capacity;
-    }
-    memcpy(out, conn.pending + conn.pending_offset, available);
-    conn.pending_offset += available;
-    return static_cast<int>(available);
+    return net::read(conn, out, capacity);
 }
 
 void* trust_store_alloc(TrustStore& store, size_t size) {

@@ -4,6 +4,7 @@
 
 #include "../crt/syscall.hpp"
 #include "../net/network_protocol.hpp"
+#include "../net/service.hpp"
 #include "../net/tcp.hpp"
 #include "../net/tcpd_protocol.hpp"
 #include "../net/udp.hpp"
@@ -1420,6 +1421,10 @@ bool poll_network(ServerContext& ctx) {
 }
 
 bool wait_for_networkd(uint32_t& server_pipe_id) {
+    if (service::lookup_pipe(service::kNetworkService, service::kAbiV1,
+                             server_pipe_id)) {
+        return true;
+    }
     uint32_t registry_handle = 0;
     networkd_protocol::Registry* registry = nullptr;
     long shm = shared_memory_open(networkd_protocol::kRegistryName,
@@ -1498,6 +1503,16 @@ int main(uint64_t, uint64_t) {
     if (!populate_registry(ctx, tcpd_server_pipe_id)) {
         print_line("tcpd: failed to publish registry");
         return 240 + g_registry_fail_reason;
+    }
+    long registrar = service_registrar_open();
+    if (registrar < 0 ||
+        !service::advertise(static_cast<uint32_t>(registrar),
+                            service::kTcpService,
+                            service::kAbiV1,
+                            tcpd_server_pipe_id,
+                            "tcpd")) {
+        print_line("tcpd: failed to register TCP ABI");
+        return 29;
     }
 
     long network_reply_pipe = pipe_open_new(server_flags);

@@ -28,16 +28,24 @@ PACKAGE_ZIP := $(OUT_DIR)/$(PACKAGE).zip
 ASFLAGS ?= -f elf64
 CXXFLAGS ?= -std=c++20 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
             -nostdlib -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 \
-            -mno-avx -mno-avx512f -fPIE -pie -Wall -Wextra \
+            -mno-avx -mno-avx512f -fPIE -pie -fno-gnu-unique -Wall -Wextra \
             -I$(SUPPORT_ROOT)/helpers -I$(SUPPORT_ROOT)/crt -I$(SUPPORT_ROOT)/libc/include \
-            -I$(NEUTRINO_ROOT)/shared/include -I../bearssl/include/bearssl
+            -I$(NEUTRINO_ROOT)/shared/include -I../bearssl/include/bearssl \
+            -I../libnet/include
 LDFLAGS ?= -Wl,--no-dynamic-linker
 EXTRA_LIBS ?=
+LIBNET_LIBRARY ?= ../libnet/library/libnet.so.0
 
 .PHONY: all package clean
 .SECONDARY: $(PROGRAM_OBJECTS)
 
 all: $(PROGRAM_TARGETS)
+
+ifneq ($(filter $(LIBNET_LIBRARY),$(EXTRA_LIBS)),)
+$(PROGRAM_TARGETS): $(LIBNET_LIBRARY)
+$(LIBNET_LIBRARY):
+	$(MAKE) -C ../libnet
+endif
 
 $(OUT_DIR)/%.elf: $(BUILD_DIR)/src/%.o $(CRT_OBJECT) $(LIBC_OBJECTS) $(HELPER_OBJECTS) | $(OUT_DIR)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) $(CRT_OBJECT) $(LIBC_OBJECTS) $(HELPER_OBJECTS) $< $(EXTRA_LIBS) -o $@
