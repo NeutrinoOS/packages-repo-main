@@ -20,6 +20,7 @@ constexpr size_t kMaxLoginUsers = 32;
 constexpr const char* kRootUserName = "root";
 constexpr uint64_t kAllCapabilities = ~0ull;
 constexpr size_t kMaxServices = 24;
+constexpr uint32_t kMaxAutomaticServiceStarts = 8;
 constexpr size_t kServiceDescriptionSize = 96;
 constexpr size_t kServicePathSize = 192;
 constexpr size_t kServiceArgsSize = 192;
@@ -936,11 +937,20 @@ void reap_service_children() {
                              service->desired_running &&
                              !service->restart_requested &&
                              exit_code == 0;
+        bool policy_restart =
+            service->desired_running &&
+            (service->restart == RestartPolicy::Always ||
+             (service->restart == RestartPolicy::OnFailure && exit_code != 0));
+        bool automatic_restart_allowed =
+            service->starts < kMaxAutomaticServiceStarts;
         bool should_restart = service->restart_requested ||
-            (service->desired_running && service->restart == RestartPolicy::Always) ||
-            (service->desired_running && service->restart == RestartPolicy::OnFailure &&
-             exit_code != 0);
+                              (policy_restart && automatic_restart_allowed);
         service->restart_requested = false;
+        if (policy_restart && !automatic_restart_allowed) {
+            constexpr char message[] =
+                "\n[init: automatic restart limit reached]\n";
+            append_log(*service, message, sizeof(message) - 1);
+        }
         if (!should_restart) service->desired_running = false;
         if (should_restart) {
             append_log(*service, "\n[init: restarting service]\n", 28);
@@ -1040,12 +1050,14 @@ void respond_to_request(const service_protocol::Request& request) {
     } else if (request.command == service_protocol::kStatus) {
         append_service_status(length, *service, true);
     } else if (request.command == service_protocol::kStart) {
+        if (service->pid == 0) service->starts = 0;
         if (!start_service(*service)) status = service_protocol::kStatusFailed;
         append_service_status(length, *service, false);
     } else if (request.command == service_protocol::kStop) {
         if (!stop_service(*service, false)) status = service_protocol::kStatusFailed;
         append_service_status(length, *service, false);
     } else if (request.command == service_protocol::kRestart) {
+        service->starts = 0;
         if (!stop_service(*service, true)) status = service_protocol::kStatusFailed;
         append_service_status(length, *service, false);
     } else if (request.command == service_protocol::kLogs) {
