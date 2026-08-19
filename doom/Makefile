@@ -37,7 +37,7 @@ PACKAGE_ZIP := $(OUT_DIR)/$(PROGRAM).zip
 
 COMMON_FLAGS := -ffreestanding -fno-builtin -fno-stack-protector -nostdlib \
 	-m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-avx \
-	-mno-avx512f -fPIE -Os -ffunction-sections -fdata-sections \
+	-mno-avx512f -fPIE -O2 -ffunction-sections -fdata-sections \
 	-fno-omit-frame-pointer -Wall -Wextra \
 	-Iinclude -I$(DOOM_DIR) -DDOOMGENERIC_RESX=320 -DDOOMGENERIC_RESY=200 \
 	-DFEATURE_NEUTRINO_SOUND

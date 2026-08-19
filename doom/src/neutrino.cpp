@@ -29,6 +29,7 @@ uint64_t g_desktop_token = 0;
 uint32_t* g_desktop_pixels = nullptr;
 bool g_desktop_mode = false;
 bool g_active = false;
+const char* g_desktop_connect_error = "not attempted";
 descriptor_defs::FramebufferInfo g_info{};
 uint32_t g_bytes_per_pixel = 0;
 uint32_t g_scale = 1;
@@ -80,7 +81,7 @@ void queue_key(int pressed, unsigned char key) {
 
 void append_decimal(char* output, size_t capacity, uint64_t value) {
     if (output == nullptr || capacity == 0) return;
-    char reverse[16];
+    char reverse[24];
     size_t count = 0;
     do {
         reverse[count++] = static_cast<char>('0' + value % 10);
@@ -267,6 +268,7 @@ int parse_arguments(const char* raw, char* storage, char** arguments) {
 }
 
 bool connect_desktop() {
+    g_desktop_connect_error = "opening registry";
     long registry_handle =
         shared_memory_open(desktop_protocol::kRegistryName,
                            sizeof(desktop_protocol::Registry));
@@ -277,6 +279,7 @@ bool connect_desktop() {
         registry_info.base == 0 ||
         registry_info.length < sizeof(desktop_protocol::Registry)) {
         descriptor_close(static_cast<uint32_t>(registry_handle));
+        g_desktop_connect_error = "reading registry";
         return false;
     }
     const auto registry = *reinterpret_cast<const desktop_protocol::Registry*>(
@@ -284,23 +287,36 @@ bool connect_desktop() {
     descriptor_close(static_cast<uint32_t>(registry_handle));
     if (registry.magic != desktop_protocol::kRegistryMagic ||
         registry.version != desktop_protocol::kVersion ||
-        registry.server_pipe_id == 0) return false;
+        registry.server_pipe_id == 0) {
+        g_desktop_connect_error = "validating registry";
+        return false;
+    }
 
     uint64_t write_flags =
         static_cast<uint64_t>(descriptor_defs::Flag::Writable) |
         static_cast<uint64_t>(descriptor_defs::Flag::Async);
     long server = pipe_open_existing(write_flags, registry.server_pipe_id);
-    if (server < 0) return false;
+    if (server < 0) {
+        g_desktop_connect_error = "opening server pipe";
+        return false;
+    }
     uint64_t read_flags =
         static_cast<uint64_t>(descriptor_defs::Flag::Readable) |
         static_cast<uint64_t>(descriptor_defs::Flag::Async);
     long events = pipe_open_new(read_flags);
     descriptor_defs::PipeInfo event_info{};
-    if (events < 0 ||
-        pipe_get_info(static_cast<uint32_t>(events), &event_info) != 0 ||
-        event_info.id == 0) {
+    long event_info_result = events < 0
+                                 ? -1
+                                 : pipe_get_info(static_cast<uint32_t>(events),
+                                                 &event_info);
+    if (events < 0 || event_info_result != 0 || event_info.id == 0) {
         if (events >= 0) descriptor_close(static_cast<uint32_t>(events));
         descriptor_close(static_cast<uint32_t>(server));
+        g_desktop_connect_error = events < 0
+                                      ? "opening reply pipe"
+                                      : event_info_result != 0
+                                            ? "reading reply pipe id"
+                                            : "receiving an empty reply pipe id";
         return false;
     }
 
@@ -309,6 +325,7 @@ bool connect_desktop() {
         token == 0) {
         descriptor_close(static_cast<uint32_t>(events));
         descriptor_close(static_cast<uint32_t>(server));
+        g_desktop_connect_error = "generating token";
         return false;
     }
     char surface_name[48] = "neutrino.doom.";
@@ -317,6 +334,7 @@ bool connect_desktop() {
     if (surface_name_length + 1 >= sizeof(surface_name)) {
         descriptor_close(static_cast<uint32_t>(events));
         descriptor_close(static_cast<uint32_t>(server));
+        g_desktop_connect_error = "formatting surface name";
         return false;
     }
     surface_name[surface_name_length] = '.';
@@ -332,6 +350,7 @@ bool connect_desktop() {
         if (surface >= 0) descriptor_close(static_cast<uint32_t>(surface));
         descriptor_close(static_cast<uint32_t>(events));
         descriptor_close(static_cast<uint32_t>(server));
+        g_desktop_connect_error = "mapping surface";
         return false;
     }
     memset(reinterpret_cast<void*>(surface_info.base), 0, kSurfaceBytes);
@@ -352,6 +371,7 @@ bool connect_desktop() {
         descriptor_close(static_cast<uint32_t>(surface));
         descriptor_close(static_cast<uint32_t>(events));
         descriptor_close(static_cast<uint32_t>(server));
+        g_desktop_connect_error = "sending create request";
         return false;
     }
     desktop_protocol::CreatedMessage response{};
@@ -382,6 +402,9 @@ bool connect_desktop() {
         descriptor_close(static_cast<uint32_t>(surface));
         descriptor_close(static_cast<uint32_t>(events));
         descriptor_close(static_cast<uint32_t>(server));
+        g_desktop_connect_error = response_bytes == sizeof(response)
+                                      ? "create request rejected"
+                                      : "waiting for create response";
         return false;
     }
     g_desktop_server = static_cast<uint32_t>(server);
@@ -391,14 +414,31 @@ bool connect_desktop() {
     g_desktop_token = token;
     g_desktop_pixels = reinterpret_cast<uint32_t*>(surface_info.base);
     g_desktop_mode = true;
+    g_desktop_connect_error = "none";
     return true;
+}
+
+bool connect_desktop_with_retry(uint32_t attempts, uint32_t delay_ms) {
+    for (uint32_t attempt = 0; attempt < attempts; ++attempt) {
+        if (connect_desktop()) return true;
+        if (attempt + 1 < attempts) (void)sleep_ms(delay_ms);
+    }
+    return false;
+}
+
+void close_raw_graphics() {
+    if (g_keyboard != UINT32_MAX) descriptor_close(g_keyboard);
+    if (g_framebuffer != UINT32_MAX) descriptor_close(g_framebuffer);
+    if (g_session != UINT32_MAX) descriptor_close(g_session);
+    g_keyboard = g_framebuffer = g_session = UINT32_MAX;
+    g_active = false;
 }
 
 }  // namespace
 
 extern "C" void DG_Init() {
     atexit(cleanup);
-    if (connect_desktop()) return;
+    if (connect_desktop_with_retry(20, 50)) return;
 
     long session = graphical_session_open();
     if (session < 0) fail("graphical session unavailable");
@@ -481,7 +521,29 @@ extern "C" void DG_DrawFrame() {
         // it until the first frame keeps WAD/startup errors visible instead of
         // briefly replacing the console with an empty graphical session.
         if (graphical_session_set_active(g_session, true) != 0) {
-            fail("unable to activate graphical session");
+            // The compositor may have been busy creating or repainting another
+            // window during the startup handshake.  Never fight an active
+            // desktop for fullscreen ownership; release the raw fallback and
+            // make one final compositor connection attempt instead.
+            close_raw_graphics();
+            if (connect_desktop_with_retry(40, 50)) {
+                memcpy(g_desktop_pixels, DG_ScreenBuffer,
+                       static_cast<size_t>(DOOMGENERIC_RESX) *
+                           DOOMGENERIC_RESY * sizeof(uint32_t));
+                desktop_protocol::DamageMessage damage{
+                    desktop_protocol::header(
+                        desktop_protocol::MessageType::Damage,
+                        sizeof(damage), g_desktop_window, g_desktop_token),
+                    0, 0, DOOMGENERIC_RESX, DOOMGENERIC_RESY};
+                if (descriptor_write(g_desktop_server, &damage,
+                                     sizeof(damage)) !=
+                    static_cast<long>(sizeof(damage))) {
+                    fail("desktop connection lost");
+                }
+                poll_keyboard();
+                return;
+            }
+            fail(g_desktop_connect_error);
         }
         g_active = true;
     } else if (framebuffer_present(g_framebuffer, &damage) != 0) {
