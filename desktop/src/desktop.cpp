@@ -1,37 +1,56 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "../crt/syscall.hpp"
 #include "../desktop_protocol.hpp"
 #include "font8x8_basic.hpp"
+#include "compositor.hpp"
+#include "ui.hpp"
 
 namespace {
 
 constexpr uint32_t kKeyboardType =
     static_cast<uint32_t>(descriptor_defs::Type::Keyboard);
-constexpr uint32_t kTitleHeight = 26;
+constexpr uint32_t kTitleHeight = neutrino::ui::Metrics::title_height;
 constexpr uint32_t kMaxWindows = 6;
-constexpr int32_t kCursorWidth = 12;
-constexpr int32_t kCursorHeight = 18;
+constexpr uint32_t kFallbackCursorWidth = 12;
+constexpr uint32_t kFallbackCursorHeight = 18;
+constexpr uint32_t kMaxCursorDimension = 64;
+constexpr size_t kMaxCursorPixels =
+    static_cast<size_t>(kMaxCursorDimension) * kMaxCursorDimension;
+constexpr size_t kMaxCursorFileSize = 16 * 1024;
 constexpr size_t kReceiveBufferSize = 2048;
 
-struct Rect {
-    int32_t x;
-    int32_t y;
-    int32_t width;
-    int32_t height;
-};
+using Rect = neutrino::ui::Rect;
+using SceneDamage = neutrino::ui::DamageRegion<kMaxWindows * 2>;
 
 struct Theme {
-    uint32_t background = 0x16445c;
-    uint32_t taskbar = 0x131922;
-    uint32_t panel = 0xedf1f4;
-    uint32_t title = 0x226084;
-    uint32_t accent = 0x40a9d3;
-    uint32_t taskbar_height = 42;
+    uint32_t background = neutrino::ui::Palette::desktop_top;
+    uint32_t background_low = neutrino::ui::Palette::desktop_bottom;
+    uint32_t taskbar = 0x111a22;
+    uint32_t panel = neutrino::ui::Palette::surface;
+    uint32_t title = neutrino::ui::Palette::chrome;
+    uint32_t title_inactive = neutrino::ui::Palette::chrome_inactive;
+    uint32_t accent = neutrino::ui::Palette::accent;
+    uint32_t taskbar_height = neutrino::ui::Metrics::taskbar_height;
     char launcher_label[17] = "DOOM";
     char launcher_path[96] = "@sys/binary/doom.elf";
     char launcher_args[160] = "-iwad @sys/doom1.wad";
+    char cursor_bitmap[192] = "@sys/share/desktop/bitmaps/cur.bmp";
+    uint32_t cursor_scale_low = 1;
+    uint32_t cursor_scale_720p = 2;
+    uint32_t cursor_scale_2k = 3;
+    uint32_t cursor_scale_4k = 4;
+};
+
+struct CursorImage {
+    bool loaded;
+    uint32_t width = kFallbackCursorWidth;
+    uint32_t height = kFallbackCursorHeight;
+    uint32_t scale = 1;
+    uint32_t pixels[kMaxCursorPixels];
+    uint8_t opaque[kMaxCursorPixels];
 };
 
 struct Window {
@@ -56,7 +75,8 @@ uint32_t g_framebuffer = kInvalidDescriptor;
 uint8_t* g_pixels = nullptr;
 uint32_t g_bytes_per_pixel = 0;
 Theme g_theme{};
-Window g_windows[kMaxWindows]{};
+CursorImage g_cursor{};
+neutrino::ui::WindowStack<Window, kMaxWindows> g_windows{};
 uint32_t g_next_window_id = 1;
 int32_t g_cursor_x = 0;
 int32_t g_cursor_y = 0;
@@ -69,6 +89,7 @@ int32_t g_resize_index = -1;
 Rect g_clip{};
 uint8_t g_receive_buffer[kReceiveBufferSize]{};
 size_t g_receive_used = 0;
+uint8_t g_cursor_file[kMaxCursorFileSize]{};
 
 void copy_text(char* output, size_t capacity, const char* input) {
     if (output == nullptr || capacity == 0) return;
@@ -117,6 +138,18 @@ uint32_t hex_color(const char* text, uint32_t fallback) {
     return text[6] == '\0' ? value : fallback;
 }
 
+uint32_t blend_color(uint32_t top, uint32_t bottom, uint32_t amount,
+                     uint32_t range) {
+    uint32_t inverse = range - amount;
+    uint32_t red = (((top >> 16) & 0xffu) * inverse +
+                    ((bottom >> 16) & 0xffu) * amount) / range;
+    uint32_t green = (((top >> 8) & 0xffu) * inverse +
+                      ((bottom >> 8) & 0xffu) * amount) / range;
+    uint32_t blue = ((top & 0xffu) * inverse + (bottom & 0xffu) * amount) /
+                    range;
+    return (red << 16) | (green << 8) | blue;
+}
+
 uint32_t decimal(const char* text, uint32_t fallback) {
     uint32_t value = 0;
     bool have_digit = false;
@@ -129,9 +162,11 @@ uint32_t decimal(const char* text, uint32_t fallback) {
 
 void apply_setting(const char* key, const char* value) {
     if (equal_text(key, "background")) g_theme.background = hex_color(value, g_theme.background);
+    else if (equal_text(key, "background_low")) g_theme.background_low = hex_color(value, g_theme.background_low);
     else if (equal_text(key, "taskbar")) g_theme.taskbar = hex_color(value, g_theme.taskbar);
     else if (equal_text(key, "panel")) g_theme.panel = hex_color(value, g_theme.panel);
     else if (equal_text(key, "title")) g_theme.title = hex_color(value, g_theme.title);
+    else if (equal_text(key, "title_inactive")) g_theme.title_inactive = hex_color(value, g_theme.title_inactive);
     else if (equal_text(key, "accent")) g_theme.accent = hex_color(value, g_theme.accent);
     else if (equal_text(key, "taskbar_height")) {
         uint32_t height = decimal(value, g_theme.taskbar_height);
@@ -142,6 +177,20 @@ void apply_setting(const char* key, const char* value) {
         copy_text(g_theme.launcher_path, sizeof(g_theme.launcher_path), value);
     } else if (equal_text(key, "launcher_args")) {
         copy_text(g_theme.launcher_args, sizeof(g_theme.launcher_args), value);
+    } else if (equal_text(key, "cursor_bitmap")) {
+        copy_text(g_theme.cursor_bitmap, sizeof(g_theme.cursor_bitmap), value);
+    } else if (equal_text(key, "cursor_scale_low")) {
+        uint32_t scale = decimal(value, g_theme.cursor_scale_low);
+        if (scale >= 1 && scale <= 8) g_theme.cursor_scale_low = scale;
+    } else if (equal_text(key, "cursor_scale_720p")) {
+        uint32_t scale = decimal(value, g_theme.cursor_scale_720p);
+        if (scale >= 1 && scale <= 8) g_theme.cursor_scale_720p = scale;
+    } else if (equal_text(key, "cursor_scale_2k")) {
+        uint32_t scale = decimal(value, g_theme.cursor_scale_2k);
+        if (scale >= 1 && scale <= 8) g_theme.cursor_scale_2k = scale;
+    } else if (equal_text(key, "cursor_scale_4k")) {
+        uint32_t scale = decimal(value, g_theme.cursor_scale_4k);
+        if (scale >= 1 && scale <= 8) g_theme.cursor_scale_4k = scale;
     }
 }
 
@@ -167,6 +216,116 @@ void load_config() {
         }
         line = bytes + i + 1;
     }
+}
+
+uint16_t little_u16(const uint8_t* bytes) {
+    return static_cast<uint16_t>(bytes[0]) |
+           static_cast<uint16_t>(static_cast<uint16_t>(bytes[1]) << 8);
+}
+
+uint32_t little_u32(const uint8_t* bytes) {
+    return static_cast<uint32_t>(bytes[0]) |
+           (static_cast<uint32_t>(bytes[1]) << 8) |
+           (static_cast<uint32_t>(bytes[2]) << 16) |
+           (static_cast<uint32_t>(bytes[3]) << 24);
+}
+
+uint8_t expand_5_bit(uint16_t value) {
+    return static_cast<uint8_t>((static_cast<uint32_t>(value) * 255u + 15u) /
+                                31u);
+}
+
+uint32_t cursor_scale_for_resolution() {
+    if (g_fb.height >= 2160) return g_theme.cursor_scale_4k;
+    if (g_fb.height >= 1440) return g_theme.cursor_scale_2k;
+    if (g_fb.height >= 720) return g_theme.cursor_scale_720p;
+    return g_theme.cursor_scale_low;
+}
+
+bool load_cursor_bitmap() {
+    g_cursor = {};
+    g_cursor.scale = cursor_scale_for_resolution();
+    if (g_theme.cursor_bitmap[0] == '\0') return false;
+
+    long file = file_open(g_theme.cursor_bitmap);
+    if (file < 0) return false;
+    size_t size = 0;
+    while (size < sizeof(g_cursor_file)) {
+        long count = file_read(static_cast<uint32_t>(file),
+                               g_cursor_file + size,
+                               sizeof(g_cursor_file) - size);
+        if (count < 0) {
+            file_close(static_cast<uint32_t>(file));
+            return false;
+        }
+        if (count == 0) break;
+        size += static_cast<size_t>(count);
+    }
+    file_close(static_cast<uint32_t>(file));
+
+    constexpr size_t kMaskEnd = 70;
+    if (size < kMaskEnd || g_cursor_file[0] != 'B' ||
+        g_cursor_file[1] != 'M') return false;
+
+    uint32_t declared_size = little_u32(g_cursor_file + 2);
+    uint32_t pixel_offset = little_u32(g_cursor_file + 10);
+    uint32_t dib_size = little_u32(g_cursor_file + 14);
+    if (declared_size > size || declared_size < kMaskEnd || dib_size < 56 ||
+        dib_size > size - 14 || pixel_offset < 14 + dib_size ||
+        pixel_offset > declared_size) return false;
+
+    int32_t signed_width = static_cast<int32_t>(little_u32(g_cursor_file + 18));
+    int32_t signed_height = static_cast<int32_t>(little_u32(g_cursor_file + 22));
+    if (signed_width <= 0 || signed_width > static_cast<int32_t>(kMaxCursorDimension) ||
+        signed_height == 0 ||
+        signed_height > static_cast<int32_t>(kMaxCursorDimension) ||
+        signed_height < -static_cast<int32_t>(kMaxCursorDimension) ||
+        little_u16(g_cursor_file + 26) != 1 ||
+        little_u16(g_cursor_file + 28) != 16 ||
+        little_u32(g_cursor_file + 30) != 3 ||
+        little_u32(g_cursor_file + 54) != 0x7c00 ||
+        little_u32(g_cursor_file + 58) != 0x03e0 ||
+        little_u32(g_cursor_file + 62) != 0x001f ||
+        little_u32(g_cursor_file + 66) != 0x8000) return false;
+
+    uint32_t width = static_cast<uint32_t>(signed_width);
+    uint32_t height = signed_height < 0
+                          ? static_cast<uint32_t>(-signed_height)
+                          : static_cast<uint32_t>(signed_height);
+    size_t row_bytes = (static_cast<size_t>(width) * 2u + 3u) & ~size_t{3};
+    size_t pixel_bytes = row_bytes * height;
+    if (pixel_bytes > declared_size - pixel_offset) return false;
+
+    for (uint32_t y = 0; y < height; ++y) {
+        uint32_t source_y = signed_height < 0 ? y : height - 1u - y;
+        const uint8_t* row = g_cursor_file + pixel_offset + source_y * row_bytes;
+        for (uint32_t x = 0; x < width; ++x) {
+            uint16_t value = little_u16(row + static_cast<size_t>(x) * 2u);
+            size_t index = static_cast<size_t>(y) * width + x;
+            g_cursor.opaque[index] = (value & 0x8000u) != 0;
+            uint8_t red = expand_5_bit(static_cast<uint16_t>((value >> 10) & 0x1fu));
+            uint8_t green = expand_5_bit(static_cast<uint16_t>((value >> 5) & 0x1fu));
+            uint8_t blue = expand_5_bit(static_cast<uint16_t>(value & 0x1fu));
+            g_cursor.pixels[index] = (static_cast<uint32_t>(red) << 16) |
+                                     (static_cast<uint32_t>(green) << 8) | blue;
+        }
+    }
+    g_cursor.loaded = true;
+    g_cursor.width = width;
+    g_cursor.height = height;
+    return true;
+}
+
+int32_t cursor_width() {
+    return static_cast<int32_t>(g_cursor.width * g_cursor.scale);
+}
+
+int32_t cursor_height() {
+    return static_cast<int32_t>(g_cursor.height * g_cursor.scale);
+}
+
+Rect cursor_rect() {
+    return {g_cursor_x, g_cursor_y, cursor_width(), cursor_height()};
 }
 
 uint32_t scale_channel(uint8_t value, uint8_t bits) {
@@ -208,20 +367,6 @@ Rect clipped(Rect rect) {
     return rect;
 }
 
-Rect unite(Rect left, Rect right) {
-    left = clipped(left);
-    right = clipped(right);
-    if (left.width == 0 || left.height == 0) return right;
-    if (right.width == 0 || right.height == 0) return left;
-    int32_t x = left.x < right.x ? left.x : right.x;
-    int32_t y = left.y < right.y ? left.y : right.y;
-    int32_t end_x = left.x + left.width > right.x + right.width
-                        ? left.x + left.width : right.x + right.width;
-    int32_t end_y = left.y + left.height > right.y + right.height
-                        ? left.y + left.height : right.y + right.height;
-    return {x, y, end_x - x, end_y - y};
-}
-
 void put_pixel(int32_t x, int32_t y, uint32_t value) {
     if (x < g_clip.x || y < g_clip.y ||
         x >= g_clip.x + g_clip.width || y >= g_clip.y + g_clip.height) return;
@@ -242,9 +387,23 @@ void fill_rect(int32_t x, int32_t y, int32_t width, int32_t height, uint32_t rgb
     int32_t end_y = rect.y + rect.height < g_clip.y + g_clip.height
                         ? rect.y + rect.height : g_clip.y + g_clip.height;
     uint32_t value = native_color(rgb);
+    if (g_bytes_per_pixel == sizeof(uint32_t)) {
+        for (int32_t row = start_y; row < end_y; ++row) {
+            auto* pixels = reinterpret_cast<uint32_t*>(
+                g_pixels + static_cast<size_t>(row) * g_fb.pitch) + start_x;
+            for (int32_t column = start_x; column < end_x; ++column) {
+                *pixels++ = value;
+            }
+        }
+        return;
+    }
     for (int32_t row = start_y; row < end_y; ++row) {
         for (int32_t column = start_x; column < end_x; ++column) {
-            put_pixel(column, row, value);
+            uint8_t* pixel = g_pixels + static_cast<size_t>(row) * g_fb.pitch +
+                             static_cast<size_t>(column) * g_bytes_per_pixel;
+            for (uint32_t byte = 0; byte < g_bytes_per_pixel; ++byte) {
+                pixel[byte] = static_cast<uint8_t>(value >> (byte * 8u));
+            }
         }
     }
 }
@@ -284,30 +443,45 @@ void draw_frame(int32_t x, int32_t y, int32_t width, int32_t height,
 }
 
 Rect window_rect(const Window& window) {
-    return {window.x, window.y, static_cast<int32_t>(window.width),
-            static_cast<int32_t>(window.height + kTitleHeight)};
+    return neutrino::ui::window_chrome(
+        window.x, window.y, static_cast<int32_t>(window.width),
+        static_cast<int32_t>(window.height)).outer;
 }
 
 Rect window_damage_rect(const Window& window) {
-    Rect rect = window_rect(window);
-    rect.width += 5;
-    rect.height += 6;
-    return rect;
+    return neutrino::ui::window_chrome(
+        window.x, window.y, static_cast<int32_t>(window.width),
+        static_cast<int32_t>(window.height)).damage;
 }
 
 void draw_window(const Window& window, bool focused) {
     int32_t width = static_cast<int32_t>(window.width);
     int32_t height = static_cast<int32_t>(window.height);
-    fill_rect(window.x + 5, window.y + 6, width, height + kTitleHeight, 0x0c2a39);
-    fill_rect(window.x, window.y, width, kTitleHeight,
-              focused ? g_theme.title : 0x596873);
-    draw_frame(window.x, window.y, width, height + kTitleHeight, 0x0b1116);
-    draw_text(window.x + 8, window.y + 8, window.title, 0xffffff);
-    fill_rect(window.x + width - 22, window.y + 5, 16, 16, 0xc74d4d);
-    draw_text(window.x + width - 18, window.y + 9, "x", 0xffffff);
+    auto chrome = neutrino::ui::window_chrome(window.x, window.y, width, height);
+    // Chrome belongs exclusively to the compositor.  Every client therefore
+    // receives identical focus treatment regardless of its rendering cadence.
+    fill_rect(chrome.shadow.x, chrome.shadow.y, chrome.shadow.width,
+              chrome.shadow.height, neutrino::ui::Palette::shadow);
+    fill_rect(window.x + 5, window.y + 6, width,
+              height + kTitleHeight, 0x071016);
+    fill_rect(chrome.titlebar.x, chrome.titlebar.y, chrome.titlebar.width,
+              chrome.titlebar.height,
+              focused ? g_theme.title : g_theme.title_inactive);
+    if (focused) fill_rect(window.x, window.y, width, 3, g_theme.accent);
+    draw_frame(window.x, window.y, width, height + kTitleHeight,
+               neutrino::ui::Palette::outline);
+    draw_text(window.x + 10, window.y + 11, window.title,
+              focused ? neutrino::ui::Palette::chrome_text : 0xc4cdd2);
+    fill_rect(chrome.close_button.x, chrome.close_button.y,
+              chrome.close_button.width, chrome.close_button.height,
+              focused ? neutrino::ui::Palette::danger : 0x53616a);
+    draw_frame(chrome.close_button.x, chrome.close_button.y,
+               chrome.close_button.width, chrome.close_button.height,
+               neutrino::ui::Palette::outline);
+    draw_text(window.x + width - 21, window.y + 11, "x",
+              neutrino::ui::Palette::chrome_text);
 
-    Rect content{window.x, window.y + static_cast<int32_t>(kTitleHeight),
-                 width, height};
+    Rect content = chrome.content;
     if (!intersects(content, g_clip)) return;
     int32_t start_x = content.x > g_clip.x ? content.x : g_clip.x;
     int32_t start_y = content.y > g_clip.y ? content.y : g_clip.y;
@@ -315,16 +489,39 @@ void draw_window(const Window& window, bool focused) {
                         ? content.x + content.width : g_clip.x + g_clip.width;
     int32_t end_y = content.y + content.height < g_clip.y + g_clip.height
                         ? content.y + content.height : g_clip.y + g_clip.height;
-    for (int32_t y = start_y; y < end_y; ++y) {
-        uint32_t source_y =
-            static_cast<uint32_t>(y - content.y) * window.surface_height /
-            window.height;
-        for (int32_t x = start_x; x < end_x; ++x) {
-            uint32_t source_x =
-                static_cast<uint32_t>(x - content.x) * window.surface_width /
-                window.width;
-            put_pixel(x, y, native_color(
-                window.pixels[source_y * window.surface_width + source_x]));
+    bool direct_copy = g_bytes_per_pixel == sizeof(uint32_t) &&
+                       g_fb.red_mask_size == 8 && g_fb.red_mask_shift == 16 &&
+                       g_fb.green_mask_size == 8 && g_fb.green_mask_shift == 8 &&
+                       g_fb.blue_mask_size == 8 && g_fb.blue_mask_shift == 0 &&
+                       window.surface_width == window.width &&
+                       window.surface_height == window.height;
+    if (direct_copy) {
+        size_t row_bytes = static_cast<size_t>(end_x - start_x) *
+                           sizeof(uint32_t);
+        size_t source_x = static_cast<size_t>(start_x - content.x);
+        for (int32_t y = start_y; y < end_y; ++y) {
+            size_t source_y = static_cast<size_t>(y - content.y);
+            const uint32_t* source = window.pixels +
+                                     source_y * window.surface_width +
+                                     source_x;
+            uint8_t* destination = g_pixels +
+                                   static_cast<size_t>(y) * g_fb.pitch +
+                                   static_cast<size_t>(start_x) *
+                                       sizeof(uint32_t);
+            memcpy(destination, source, row_bytes);
+        }
+    } else {
+        for (int32_t y = start_y; y < end_y; ++y) {
+            uint32_t source_y =
+                static_cast<uint32_t>(y - content.y) * window.surface_height /
+                window.height;
+            for (int32_t x = start_x; x < end_x; ++x) {
+                uint32_t source_x =
+                    static_cast<uint32_t>(x - content.x) * window.surface_width /
+                    window.width;
+                put_pixel(x, y, native_color(
+                    window.pixels[source_y * window.surface_width + source_x]));
+            }
         }
     }
     for (int32_t inset = 3; inset <= 9; inset += 3) {
@@ -346,13 +543,30 @@ bool cursor_pixel(int32_t x, int32_t y) {
 }
 
 void draw_cursor() {
-    for (int32_t y = 0; y < kCursorHeight; ++y) {
-        for (int32_t x = 0; x < kCursorWidth; ++x) {
+    if (g_cursor.loaded) {
+        for (uint32_t y = 0; y < g_cursor.height; ++y) {
+            for (uint32_t x = 0; x < g_cursor.width; ++x) {
+                size_t index = static_cast<size_t>(y) * g_cursor.width + x;
+                if (g_cursor.opaque[index] == 0) continue;
+                fill_rect(g_cursor_x + static_cast<int32_t>(x * g_cursor.scale),
+                          g_cursor_y + static_cast<int32_t>(y * g_cursor.scale),
+                          static_cast<int32_t>(g_cursor.scale),
+                          static_cast<int32_t>(g_cursor.scale),
+                          g_cursor.pixels[index]);
+            }
+        }
+        return;
+    }
+    for (int32_t y = 0; y < static_cast<int32_t>(kFallbackCursorHeight); ++y) {
+        for (int32_t x = 0; x < static_cast<int32_t>(kFallbackCursorWidth); ++x) {
             if (!cursor_pixel(x, y)) continue;
             bool edge = x == 0 || y == x * 2 || y == x * 2 + 1 ||
-                        y == kCursorHeight - 1;
-            put_pixel(g_cursor_x + x, g_cursor_y + y,
-                      native_color(edge ? 0x000000 : 0xffffff));
+                        y == static_cast<int32_t>(kFallbackCursorHeight) - 1;
+            fill_rect(g_cursor_x + x * static_cast<int32_t>(g_cursor.scale),
+                      g_cursor_y + y * static_cast<int32_t>(g_cursor.scale),
+                      static_cast<int32_t>(g_cursor.scale),
+                      static_cast<int32_t>(g_cursor.scale),
+                      edge ? 0x000000 : 0xffffff);
         }
     }
 }
@@ -361,30 +575,55 @@ void render(Rect damage) {
     damage = clipped(damage);
     if (damage.width <= 0 || damage.height <= 0) return;
     g_clip = damage;
-    fill_rect(0, 0, static_cast<int32_t>(g_fb.width),
-              static_cast<int32_t>(g_fb.height), g_theme.background);
+    int32_t desktop_height = static_cast<int32_t>(
+        g_fb.height - g_theme.taskbar_height);
+    // A small fixed number of strips is visually smoother than flat slabs,
+    // while retaining clipped rectangle fills instead of a per-pixel blend.
+    constexpr int32_t kBackgroundBands = 12;
+    for (int32_t band = 0; band < kBackgroundBands; ++band) {
+        int32_t top = band * desktop_height / kBackgroundBands;
+        int32_t bottom = (band + 1) * desktop_height / kBackgroundBands;
+        fill_rect(0, top, static_cast<int32_t>(g_fb.width), bottom - top,
+                  blend_color(g_theme.background, g_theme.background_low,
+                              static_cast<uint32_t>(band),
+                              kBackgroundBands - 1));
+    }
 
     int32_t taskbar_y =
         static_cast<int32_t>(g_fb.height - g_theme.taskbar_height);
     fill_rect(0, taskbar_y, static_cast<int32_t>(g_fb.width),
               static_cast<int32_t>(g_theme.taskbar_height), g_theme.taskbar);
-    fill_rect(8, taskbar_y + 7, 92,
-              static_cast<int32_t>(g_theme.taskbar_height) - 14, g_theme.accent);
-    draw_text(20, taskbar_y + 13, "NEUTRINO", 0x192026);
-    fill_rect(108, taskbar_y + 7, 88,
-              static_cast<int32_t>(g_theme.taskbar_height) - 14, 0x35444e);
-    draw_text(120, taskbar_y + 13, g_theme.launcher_label, 0xffffff);
+    fill_rect(0, taskbar_y, static_cast<int32_t>(g_fb.width), 1, g_theme.accent);
+    fill_rect(8, taskbar_y + 8, 92,
+              static_cast<int32_t>(g_theme.taskbar_height) - 16, g_theme.accent);
+    draw_frame(8, taskbar_y + 8, 92,
+               static_cast<int32_t>(g_theme.taskbar_height) - 16,
+               neutrino::ui::Palette::outline);
+    draw_text(18, taskbar_y + 20, "NEUTRINO",
+              neutrino::ui::Palette::ink);
+    fill_rect(108, taskbar_y + 8, 104,
+              static_cast<int32_t>(g_theme.taskbar_height) - 16, 0x2b3943);
+    draw_frame(108, taskbar_y + 8, 104,
+               static_cast<int32_t>(g_theme.taskbar_height) - 16, 0x52616b);
+    draw_text(122, taskbar_y + 20, g_theme.launcher_label,
+              neutrino::ui::Palette::chrome_text);
 
-    for (uint32_t i = 0; i < kMaxWindows; ++i) {
-        if (g_windows[i].used) draw_window(g_windows[i], i == kMaxWindows - 1);
+    for (size_t i = 0; i < g_windows.size(); ++i) {
+        draw_window(g_windows[i], i + 1 == g_windows.size());
     }
     if (g_menu_open) {
         int32_t menu_y = taskbar_y - 96;
+        fill_rect(11, menu_y + 4, 220, 88, neutrino::ui::Palette::shadow);
         fill_rect(8, menu_y, 220, 88, g_theme.panel);
-        draw_frame(8, menu_y, 220, 88, 0x0b1116);
+        draw_frame(8, menu_y, 220, 88, neutrino::ui::Palette::outline);
         fill_rect(9, menu_y + 1, 218, 30, g_theme.title);
-        draw_text(20, menu_y + 8, "Applications", 0xffffff);
-        draw_text(24, menu_y + 51, g_theme.launcher_label, 0x192026);
+        fill_rect(9, menu_y + 1, 218, 3, g_theme.accent);
+        draw_text(20, menu_y + 12, "Applications",
+                  neutrino::ui::Palette::chrome_text);
+        fill_rect(17, menu_y + 40, 202, 37, 0xdfe8ed);
+        draw_frame(17, menu_y + 40, 202, 37, 0xaab8c1);
+        draw_text(28, menu_y + 55, g_theme.launcher_label,
+                  neutrino::ui::Palette::ink);
     }
     draw_cursor();
     descriptor_defs::FramebufferRect present{
@@ -393,18 +632,12 @@ void render(Rect damage) {
     (void)framebuffer_present(g_framebuffer, &present);
 }
 
-void move_to_front(uint32_t index) {
-    if (index >= kMaxWindows || !g_windows[index].used) return;
-    Window selected = g_windows[index];
-    for (uint32_t i = index; i + 1 < kMaxWindows; ++i) {
-        g_windows[i] = g_windows[i + 1];
-    }
-    g_windows[kMaxWindows - 1] = selected;
+void render_damage(const SceneDamage& damage) {
+    for (size_t i = 0; i < damage.size(); ++i) render(damage[i]);
 }
 
 int32_t window_at(int32_t x, int32_t y) {
-    for (int32_t i = static_cast<int32_t>(kMaxWindows) - 1; i >= 0; --i) {
-        if (!g_windows[i].used) continue;
+    for (int32_t i = static_cast<int32_t>(g_windows.size()) - 1; i >= 0; --i) {
         Rect rect = window_rect(g_windows[i]);
         if (x >= rect.x && y >= rect.y &&
             x < rect.x + rect.width && y < rect.y + rect.height) return i;
@@ -420,15 +653,12 @@ void send_close(Window& window) {
 }
 
 void remove_window(uint32_t index) {
-    if (index >= kMaxWindows || !g_windows[index].used) return;
-    Rect damage = window_damage_rect(g_windows[index]);
+    if (index >= g_windows.size()) return;
     descriptor_close(g_windows[index].event_pipe);
     descriptor_close(g_windows[index].surface_handle);
-    for (uint32_t i = index; i > 0; --i) {
-        g_windows[i] = g_windows[i - 1];
-    }
-    g_windows[0] = {};
-    render(damage);
+    SceneDamage damage;
+    (void)g_windows.erase(index, window_damage_rect, damage);
+    render_damage(damage);
 }
 
 void launch_configured_app() {
@@ -476,15 +706,8 @@ void handle_create(const desktop_protocol::CreateMessage& message) {
         descriptor_close(static_cast<uint32_t>(reply));
         return;
     }
-    uint32_t slot = kMaxWindows;
-    for (uint32_t i = 0; i < kMaxWindows; ++i) {
-        if (!g_windows[i].used) {
-            slot = i;
-            break;
-        }
-    }
     size_t surface_bytes = static_cast<size_t>(message.width) * message.height * 4;
-    long surface = slot < kMaxWindows
+    long surface = !g_windows.full()
                        ? shared_memory_open(message.surface_name, surface_bytes) : -1;
     descriptor_defs::SharedMemoryInfo info{};
     if (surface < 0 ||
@@ -519,20 +742,84 @@ void handle_create(const desktop_protocol::CreateMessage& message) {
         copy_fixed_text(window.title, sizeof(window.title), message.title,
                         sizeof(message.title));
     }
-    g_windows[slot] = window;
-    move_to_front(slot);
+    SceneDamage damage;
+    if (!g_windows.push(window, window_damage_rect, damage)) {
+        descriptor_close(window.surface_handle);
+        descriptor_close(window.event_pipe);
+        return;
+    }
     response.header.window_id = window.id;
     response.header.token = window.token;
     response.status = 0;
     descriptor_write(window.event_pipe, &response, sizeof(response));
-    render(window_damage_rect(g_windows[kMaxWindows - 1]));
+    render_damage(damage);
 }
 
 int32_t find_window(uint32_t id) {
-    for (uint32_t i = 0; i < kMaxWindows; ++i) {
-        if (g_windows[i].used && g_windows[i].id == id) return static_cast<int32_t>(i);
+    for (size_t i = 0; i < g_windows.size(); ++i) {
+        if (g_windows[i].id == id) return static_cast<int32_t>(i);
     }
     return -1;
+}
+
+bool accumulate_damage(const desktop_protocol::MessageHeader& header,
+                       Rect (&pending)[kMaxWindows]) {
+    if (header.magic != desktop_protocol::kMessageMagic ||
+        header.version != desktop_protocol::kVersion ||
+        header.type != desktop_protocol::MessageType::Damage ||
+        header.size != sizeof(desktop_protocol::DamageMessage)) {
+        return false;
+    }
+    int32_t index = find_window(header.window_id);
+    if (index < 0 || header.token == 0 ||
+        header.token != g_windows[index].token) {
+        return true;
+    }
+    const auto& damage =
+        reinterpret_cast<const desktop_protocol::DamageMessage&>(header);
+    Window& window = g_windows[index];
+    if (damage.x >= window.surface_width ||
+        damage.y >= window.surface_height) {
+        return true;
+    }
+    uint32_t width = damage.width;
+    uint32_t height = damage.height;
+    if (width > window.surface_width - damage.x) {
+        width = window.surface_width - damage.x;
+    }
+    if (height > window.surface_height - damage.y) {
+        height = window.surface_height - damage.y;
+    }
+    uint32_t left = damage.x * window.width / window.surface_width;
+    uint32_t top = damage.y * window.height / window.surface_height;
+    uint32_t right =
+        ((damage.x + width) * window.width + window.surface_width - 1) /
+        window.surface_width;
+    uint32_t bottom =
+        ((damage.y + height) * window.height + window.surface_height - 1) /
+        window.surface_height;
+    Rect translated{window.x + static_cast<int32_t>(left),
+                    window.y + static_cast<int32_t>(kTitleHeight + top),
+                    static_cast<int32_t>(right - left),
+                    static_cast<int32_t>(bottom - top)};
+    pending[index] = unite(pending[index], translated);
+    return true;
+}
+
+void flush_damage(Rect (&pending)[kMaxWindows]) {
+    Rect combined{};
+    for (uint32_t i = 0; i < kMaxWindows; ++i) {
+        if (pending[i].width > 0 && pending[i].height > 0) {
+            combined = unite(combined, pending[i]);
+            pending[i] = {};
+        }
+    }
+    if (combined.width > 0 && combined.height > 0) {
+        // A render composites every visible window.  Presenting once per
+        // damaged client repeats that whole job when video and a game update
+        // in the same pipe batch; combine the batch into one compositor pass.
+        render(combined);
+    }
 }
 
 void handle_message(const desktop_protocol::MessageHeader& header) {
@@ -580,6 +867,7 @@ void consume_server_pipe(uint32_t pipe) {
     if (bytes <= 0) return;
     g_receive_used += static_cast<size_t>(bytes);
     size_t consumed = 0;
+    Rect pending_damage[kMaxWindows]{};
     while (g_receive_used - consumed >= sizeof(desktop_protocol::MessageHeader)) {
         auto* header = reinterpret_cast<const desktop_protocol::MessageHeader*>(
             g_receive_buffer + consumed);
@@ -588,9 +876,18 @@ void consume_server_pipe(uint32_t pipe) {
             continue;
         }
         if (g_receive_used - consumed < header->size) break;
-        handle_message(*header);
+        if (!accumulate_damage(*header, pending_damage)) {
+            // Create/destroy messages can change window indices, so commit
+            // any accumulated repaint before applying them.
+            flush_damage(pending_damage);
+            handle_message(*header);
+        }
         consumed += header->size;
     }
+    // Shared surfaces contain the producer's newest pixels.  Rendering once
+    // per read drops redundant queued frame notifications instead of playing
+    // stale video frames one by one when a producer outruns the compositor.
+    flush_damage(pending_damage);
     if (consumed != 0) {
         for (size_t i = consumed; i < g_receive_used; ++i) {
             g_receive_buffer[i - consumed] = g_receive_buffer[i];
@@ -616,13 +913,13 @@ bool handle_keyboard(uint32_t keyboard) {
             render({8, taskbar_y - 96, 220, 88});
             continue;
         }
-        Window& focused = g_windows[kMaxWindows - 1];
-        if (!focused.used) continue;
+        Window* focused = g_windows.focused();
+        if (focused == nullptr) continue;
         desktop_protocol::KeyboardMessage message{
             desktop_protocol::header(desktop_protocol::MessageType::Keyboard,
-                                     sizeof(message), focused.id, focused.token),
+                                     sizeof(message), focused->id, focused->token),
             events[i].scancode, events[i].mods, events[i].flags};
-        (void)descriptor_write(focused.event_pipe, &message, sizeof(message));
+        (void)descriptor_write(focused->event_pipe, &message, sizeof(message));
     }
     return true;
 }
@@ -630,8 +927,8 @@ bool handle_keyboard(uint32_t keyboard) {
 void clamp_cursor() {
     if (g_cursor_x < 0) g_cursor_x = 0;
     if (g_cursor_y < 0) g_cursor_y = 0;
-    int32_t max_x = static_cast<int32_t>(g_fb.width) - kCursorWidth;
-    int32_t max_y = static_cast<int32_t>(g_fb.height) - kCursorHeight;
+    int32_t max_x = static_cast<int32_t>(g_fb.width) - 1;
+    int32_t max_y = static_cast<int32_t>(g_fb.height) - 1;
     if (g_cursor_x > max_x) g_cursor_x = max_x;
     if (g_cursor_y > max_y) g_cursor_y = max_y;
 }
@@ -641,8 +938,11 @@ void handle_mouse(uint32_t mouse) {
     long bytes = descriptor_read(mouse, events, sizeof(events));
     if (bytes <= 0) return;
     size_t count = static_cast<size_t>(bytes) / sizeof(events[0]);
-    Rect old_cursor{g_cursor_x, g_cursor_y, kCursorWidth, kCursorHeight};
+    Rect old_cursor = cursor_rect();
     Rect damage{};
+    Rect geometry_old{};
+    Rect geometry_new{};
+    bool geometry_changed = false;
     for (size_t i = 0; i < count; ++i) {
         g_cursor_x += events[i].dx;
         g_cursor_y -= events[i].dy;
@@ -658,7 +958,7 @@ void handle_mouse(uint32_t mouse) {
                 g_menu_open = !g_menu_open;
                 damage = unite(damage, {8, taskbar_y - 96, 220, 88 +
                                         static_cast<int32_t>(g_theme.taskbar_height)});
-            } else if (g_cursor_x >= 108 && g_cursor_x < 196) {
+            } else if (g_cursor_x >= 108 && g_cursor_x < 212) {
                 launch_configured_app();
             }
         } else if (left_pressed && g_menu_open &&
@@ -670,26 +970,28 @@ void handle_mouse(uint32_t mouse) {
         } else if (left_pressed) {
             int32_t index = window_at(g_cursor_x, g_cursor_y);
             if (index >= 0) {
-                Rect old = window_damage_rect(g_windows[index]);
-                move_to_front(static_cast<uint32_t>(index));
-                Window& window = g_windows[kMaxWindows - 1];
-                damage = unite(damage, old);
-                damage = unite(damage, window_damage_rect(window));
-                bool on_resize =
-                    g_cursor_x >=
-                        window.x + static_cast<int32_t>(window.width) - 14 &&
-                    g_cursor_y >=
-                        window.y + static_cast<int32_t>(
-                                       kTitleHeight + window.height) - 14;
+                SceneDamage focus_damage;
+                (void)g_windows.raise(static_cast<size_t>(index),
+                                      window_damage_rect, focus_damage);
+                for (size_t j = 0; j < focus_damage.size(); ++j)
+                    damage = unite(damage, focus_damage[j]);
+                Window& window = *g_windows.focused();
+                auto chrome = neutrino::ui::window_chrome(
+                    window.x, window.y, static_cast<int32_t>(window.width),
+                    static_cast<int32_t>(window.height));
+                bool on_resize = neutrino::ui::contains(
+                    chrome.resize_handle, g_cursor_x, g_cursor_y);
                 if (on_resize) {
-                    g_resize_index = static_cast<int32_t>(kMaxWindows - 1);
-                } else if (g_cursor_y <
-                           window.y + static_cast<int32_t>(kTitleHeight)) {
-                    if (g_cursor_x >=
-                        window.x + static_cast<int32_t>(window.width) - 24) {
+                    g_resize_index =
+                        static_cast<int32_t>(g_windows.size() - 1);
+                } else if (neutrino::ui::contains(
+                               chrome.titlebar, g_cursor_x, g_cursor_y)) {
+                    if (neutrino::ui::contains(
+                            chrome.close_button, g_cursor_x, g_cursor_y)) {
                         send_close(window);
                     } else {
-                        g_drag_index = static_cast<int32_t>(kMaxWindows - 1);
+                        g_drag_index =
+                            static_cast<int32_t>(g_windows.size() - 1);
                         g_drag_offset_x = g_cursor_x - window.x;
                         g_drag_offset_y = g_cursor_y - window.y;
                     }
@@ -699,6 +1001,7 @@ void handle_mouse(uint32_t mouse) {
         if (g_drag_index >= 0 && (events[i].buttons & 1u) != 0) {
             Window& window = g_windows[g_drag_index];
             Rect old = window_damage_rect(window);
+            if (!geometry_changed) geometry_old = old;
             window.x = g_cursor_x - g_drag_offset_x;
             window.y = g_cursor_y - g_drag_offset_y;
             int32_t min_x =
@@ -710,11 +1013,13 @@ void handle_mouse(uint32_t mouse) {
                 taskbar_y - static_cast<int32_t>(kTitleHeight) - 100;
             if (window.y < 0) window.y = 0;
             if (window.y > max_y) window.y = max_y;
-            damage = unite(damage, unite(old, window_damage_rect(window)));
+            geometry_new = window_damage_rect(window);
+            geometry_changed = true;
         }
         if (g_resize_index >= 0 && (events[i].buttons & 1u) != 0) {
             Window& window = g_windows[g_resize_index];
             Rect old = window_damage_rect(window);
+            if (!geometry_changed) geometry_old = old;
             int32_t requested_width = g_cursor_x - window.x + 1;
             int32_t requested_height =
                 g_cursor_y - window.y - static_cast<int32_t>(kTitleHeight) + 1;
@@ -727,7 +1032,8 @@ void handle_mouse(uint32_t mouse) {
             if (requested_height > max_height) requested_height = max_height;
             window.width = static_cast<uint32_t>(requested_width);
             window.height = static_cast<uint32_t>(requested_height);
-            damage = unite(damage, unite(old, window_damage_rect(window)));
+            geometry_new = window_damage_rect(window);
+            geometry_changed = true;
         }
         if (left_released) {
             g_drag_index = -1;
@@ -735,7 +1041,15 @@ void handle_mouse(uint32_t mouse) {
         }
         g_previous_buttons = events[i].buttons;
     }
-    Rect new_cursor{g_cursor_x, g_cursor_y, kCursorWidth, kCursorHeight};
+    Rect new_cursor = cursor_rect();
+    if (geometry_changed) {
+        // Recompose the old and new window bounds independently.  Joining
+        // them into one rectangle makes a fast diagonal drag repaint every
+        // pixel between the two positions, including unchanged content.
+        render(unite(unite(damage, geometry_old), old_cursor));
+        render(unite(geometry_new, new_cursor));
+        return;
+    }
     if (damage.width > 0 && damage.height > 0) {
         render(unite(unite(damage, old_cursor), new_cursor));
         return;
@@ -808,6 +1122,7 @@ int main(uint64_t, uint64_t) {
     }
     g_pixels = reinterpret_cast<uint8_t*>(g_fb.virtual_base);
     g_bytes_per_pixel = g_fb.bpp / 8u;
+    (void)load_cursor_bitmap();
 
     long keyboard = descriptor_open(kKeyboardType, 0);
     long mouse = mouse_open();
@@ -851,20 +1166,16 @@ int main(uint64_t, uint64_t) {
         while (process_wait_child(0, true) >= 0) {}
     }
 
-    for (uint32_t i = 0; i < kMaxWindows; ++i) {
-        if (g_windows[i].used) send_close(g_windows[i]);
-    }
+    for (size_t i = 0; i < g_windows.size(); ++i) send_close(g_windows[i]);
     descriptor_defs::SharedMemoryInfo registry_info{};
     (void)shared_memory_get_info(registry, &registry_info);
     auto* published = reinterpret_cast<desktop_protocol::Registry*>(
         registry_info.base);
     if (published != nullptr) published->server_pipe_id = 0;
     (void)graphical_session_set_active(static_cast<uint32_t>(session), false);
-    for (uint32_t i = 0; i < kMaxWindows; ++i) {
-        if (g_windows[i].used) {
-            descriptor_close(g_windows[i].event_pipe);
-            descriptor_close(g_windows[i].surface_handle);
-        }
+    for (size_t i = 0; i < g_windows.size(); ++i) {
+        descriptor_close(g_windows[i].event_pipe);
+        descriptor_close(g_windows[i].surface_handle);
     }
     descriptor_close(registry);
     descriptor_close(server_pipe);

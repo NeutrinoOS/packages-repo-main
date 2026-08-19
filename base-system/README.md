@@ -1,5 +1,8 @@
 # Base system
 
+This package provides Neutrino's init process, shell, and service-management
+tools. The graphical session is provided separately by the `desktop` package.
+
 `init` is Neutrino's PID 1 and service manager. It loads service definitions
 from `@sys/config/services/*.service`, starts enabled services after the root
 principal is established, tracks their PIDs and exit status, applies restart
