@@ -194,9 +194,16 @@ size_t build_prompt(char* buffer, size_t buffer_size) {
 
 bool set_console_color(long console, uint32_t fg, uint32_t bg) {
     descriptor_defs::ColorPair colors{fg, bg};
+    if (descriptor_set_property(
+            static_cast<uint32_t>(console),
+            static_cast<uint32_t>(descriptor_defs::Property::ConsoleColor),
+            &colors,
+            sizeof(colors)) == 0) {
+        return true;
+    }
     return descriptor_set_property(
                static_cast<uint32_t>(console),
-               static_cast<uint32_t>(descriptor_defs::Property::ConsoleColor),
+               static_cast<uint32_t>(descriptor_defs::Property::VtyColor),
                &colors,
                sizeof(colors)) == 0;
 }
@@ -792,8 +799,14 @@ int main(uint64_t arg, uint64_t) {
     size_t history_position = 0;
     char history_draft[kMaxInputLength]{};
 
-    bool input_is_keyboard = (std_input < 0);
-    bool echo_input = std_input < 0;
+    const long input_type = descriptor_get_type(
+        static_cast<uint32_t>(input_handle));
+    bool input_is_keyboard = input_type == static_cast<long>(kDescKeyboard);
+    // Keyboard input is echoed explicitly by the shell. VTY input is also a
+    // raw byte stream, so it needs the same local echo behavior; unlike a Unix
+    // PTY, the kernel VTY does not provide a separate line discipline.
+    bool echo_input = input_is_keyboard ||
+                      input_type == static_cast<long>(kDescVty);
     bool suppress_next_lf = false;
     uint8_t escape_state = 0;
     while (1) {
