@@ -1126,26 +1126,29 @@ bool init_device(const pci::PciDevice& device) {
     g_state.active = true;
     g_state.msi_enabled = false;
     g_state.interrupt_vector = 0;
+    g_state.poll_registered = scheduler::register_poll(poll);
 
-    uint8_t vector = interrupts::allocate_vector();
-    if (vector != 0 &&
-        interrupts::register_vector(vector, handle_interrupt) &&
-        pci::enable_msi(device,
-                        vector,
-                        static_cast<uint8_t>(lapic::id()))) {
-        g_state.msi_enabled = true;
-        g_state.interrupt_vector = vector;
-        mmio_write32(REG_IMS, kInterruptMask);
-        (void)mmio_read32(REG_ICR);
-        log_message(LogLevel::Info, "e1000e: using MSI vector %u",
-                    static_cast<unsigned int>(vector));
-    } else {
-        if (vector != 0) {
+    // Polling and MSI are alternative service paths.  Enabling both leaves
+    // the MSI handler acknowledging interrupts without servicing descriptors,
+    // which can produce an interrupt storm and starve other CPU 0 devices.
+    if (!g_state.poll_registered) {
+        uint8_t vector = interrupts::allocate_vector();
+        if (vector != 0 &&
+            interrupts::register_vector(vector, handle_interrupt) &&
+            pci::enable_msi(device,
+                            vector,
+                            static_cast<uint8_t>(lapic::id()))) {
+            g_state.msi_enabled = true;
+            g_state.interrupt_vector = vector;
+            mmio_write32(REG_IMS, kInterruptMask);
+            (void)mmio_read32(REG_ICR);
+            log_message(LogLevel::Info, "e1000e: using MSI vector %u",
+                        static_cast<unsigned int>(vector));
+        } else if (vector != 0) {
             interrupts::unregister_vector(vector);
         }
     }
 
-    g_state.poll_registered = scheduler::register_poll(poll);
     if (!g_state.poll_registered && !g_state.msi_enabled) {
         log_message(LogLevel::Warn,
                     "e1000e: failed to register MSI or deferred poll");
@@ -1200,7 +1203,11 @@ void service_device() {
     update_link_state();
     reap_tx();
 
-    for (;;) {
+    // Never monopolize the shared deferred-poll worker.  A busy device (or a
+    // descriptor that hardware immediately refills after recycling) must
+    // yield after one ring's worth of work so input pollers can run again.
+    size_t serviced = 0;
+    while (serviced < kRingCount) {
         RxDescriptor& desc = g_state.rx_ring[g_state.rx_index];
         uint8_t status = __atomic_load_n(&desc.status, __ATOMIC_ACQUIRE);
         uint8_t errors = desc.errors;
@@ -1231,6 +1238,7 @@ void service_device() {
         if (g_state.rx_index >= kRingCount) {
             g_state.rx_index = 0;
         }
+        ++serviced;
     }
 }
 
