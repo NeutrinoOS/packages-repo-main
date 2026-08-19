@@ -19,3 +19,16 @@ The neupak archive is written to `out/system-tools.zip`.
 `tree` recursively lists the current directory by default. It accepts `-a` to
 include hidden entries, `-d` to show directories only, and `-L depth` to limit
 recursion.
+
+`userctl caps` lists the kernel capability names and bit numbers understood by
+the account tool. Account creation accepts a decimal mask, `all`, the
+least-privilege `desktop` profile, or a comma-separated capability list:
+
+```sh
+userctl create alice desktop
+userctl create operator process-spawn,system-monitor,kernel-log
+```
+
+The desktop profile grants process spawning, graphics, input, audio, and
+network endpoints. It deliberately excludes raw storage, mounting,
+system administration, process inspection/control, and ACL override.

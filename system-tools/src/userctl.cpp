@@ -9,6 +9,43 @@
 
 namespace {
 
+struct CapabilitySpec {
+    const char* name;
+    uint16_t bit;
+};
+
+constexpr CapabilitySpec kCapabilities[] = {
+    {"system-settings", 0},
+    {"system-power", 1},
+    {"filesystem-mount", 2},
+    {"storage-raw-read", 3},
+    {"storage-raw-write", 4},
+    {"storage-manage", 5},
+    {"process-spawn", 6},
+    {"process-inspect", 7},
+    {"process-control", 8},
+    {"process-trace", 9},
+    {"identity-manage", 10},
+    {"module-load", 11},
+    {"graphical-session", 12},
+    {"input-devices", 13},
+    {"audio", 14},
+    {"network", 15},
+    {"network-manage", 16},
+    {"serial", 17},
+    {"pci", 18},
+    {"system-monitor", 19},
+    {"kernel-log", 20},
+    {"filesystem-override", 21},
+};
+
+constexpr uint64_t kDesktopCapabilities =
+    (1ull << 6) |   // process-spawn
+    (1ull << 12) |  // graphical-session
+    (1ull << 13) |  // input-devices
+    (1ull << 14) |  // audio
+    (1ull << 15);   // network
+
 void print(const char* s) {
     static int32_t console = -1;
     if (console < 0) {
@@ -67,6 +104,20 @@ void print_dec(const char* label, uint64_t v) {
     print(label); print(buf); print("\n");
 }
 
+void print_capabilities() {
+    print("capability bits:\n");
+    for (const CapabilitySpec& capability : kCapabilities) {
+        char bit[8];
+        u64_to_dec(capability.bit, bit, sizeof(bit));
+        print("  ");
+        print(bit);
+        print(" ");
+        print(capability.name);
+        print("\n");
+    }
+    print_dec("desktop profile: ", kDesktopCapabilities);
+}
+
 bool parse_u64(const char* s, uint64_t& out) {
     if (!s || !*s) return false;
     uint64_t val = 0;
@@ -76,6 +127,51 @@ bool parse_u64(const char* s, uint64_t& out) {
         val = val * 10 + static_cast<uint64_t>(c - '0');
     }
     out = val;
+    return true;
+}
+
+bool string_equals(const char* lhs, const char* rhs) {
+    if (lhs == nullptr || rhs == nullptr) return false;
+    while (*lhs != '\0' && *rhs != '\0' && *lhs == *rhs) {
+        ++lhs;
+        ++rhs;
+    }
+    return *lhs == '\0' && *rhs == '\0';
+}
+
+bool parse_capmask(char* text, uint64_t& out) {
+    if (string_equals(text, "all")) {
+        out = ~0ull;
+        return true;
+    }
+    if (string_equals(text, "desktop")) {
+        out = kDesktopCapabilities;
+        return true;
+    }
+    if (parse_u64(text, out)) {
+        return true;
+    }
+
+    uint64_t mask = 0;
+    char* current = text;
+    while (current != nullptr && *current != '\0') {
+        char* comma = current;
+        while (*comma != '\0' && *comma != ',') ++comma;
+        char saved = *comma;
+        *comma = '\0';
+        bool found = false;
+        for (const CapabilitySpec& capability : kCapabilities) {
+            if (string_equals(current, capability.name)) {
+                mask |= 1ull << capability.bit;
+                found = true;
+                break;
+            }
+        }
+        *comma = saved;
+        if (!found) return false;
+        current = saved == ',' ? comma + 1 : nullptr;
+    }
+    out = mask;
     return true;
 }
 
@@ -195,15 +291,14 @@ extern "C" int main(uint64_t arg_ptr, uint64_t /*flags*/) {
         out[n] = '\0';
     };
 
-    auto parse_token_u64 = [&](size_t idx, uint64_t& out) -> bool {
-        char buf[32];
-        copy_token(idx, buf, sizeof(buf));
-        return parse_u64(buf, out);
-    };
-
     if (tok_count < 1) {
-        print("usage: userctl create <name> <capmask>|find <name>|bump <name>|passwd <name>|info <name>\n");
+        print("usage: userctl caps|create <name> <capmask|profile|names>|find <name>|bump <name>|passwd <name>|info <name>\n");
         return 1;
+    }
+
+    if (token_equals(0, "caps")) {
+        print_capabilities();
+        return 0;
     }
 
     if (token_equals(0, "create")) {
@@ -213,8 +308,10 @@ extern "C" int main(uint64_t arg_ptr, uint64_t /*flags*/) {
         }
         char name_buf[33];
         copy_token(1, name_buf, sizeof(name_buf));
+        char mask_buf[256];
+        copy_token(2, mask_buf, sizeof(mask_buf));
         uint64_t mask = 0;
-        if (!parse_token_u64(2, mask)) {
+        if (!parse_capmask(mask_buf, mask)) {
             print("invalid capmask\n");
             return 1;
         }
