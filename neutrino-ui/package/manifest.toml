@@ -1,0 +1,5 @@
+[neutrino-ui]
+version = "0.2.0"
+strategy = "over_root"
+description = "Canonical Neutrino desktop protocol, window, theme, and canvas toolkit"
+depends = ["base-system"]
