@@ -2,6 +2,8 @@
 
 #include <stdint.h>
 
+#include "desktop_protocol.h"
+
 namespace desktop_protocol {
 
 constexpr const char* kRegistryName = "neutrino.desktop";
@@ -92,3 +94,14 @@ inline bool valid(const MessageHeader& value, MessageType type, uint32_t size) {
 }
 
 }  // namespace desktop_protocol
+
+static_assert(sizeof(desktop_protocol::Registry) ==
+              sizeof(NeutrinoDesktopRegistry));
+static_assert(sizeof(desktop_protocol::MessageHeader) ==
+              sizeof(NeutrinoDesktopMessageHeader));
+static_assert(sizeof(desktop_protocol::CreateMessage) ==
+              sizeof(NeutrinoDesktopCreateMessage));
+static_assert(sizeof(desktop_protocol::DamageMessage) ==
+              sizeof(NeutrinoDesktopDamageMessage));
+static_assert(sizeof(desktop_protocol::KeyboardMessage) ==
+              sizeof(NeutrinoDesktopKeyboardMessage));
