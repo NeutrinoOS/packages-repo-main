@@ -1,5 +1,5 @@
 [tinybench]
-version = "0.1.0"
+version = "0.1.1"
 strategy = "over_root"
 description = "Small CPU, memory, and libc benchmark"
 depends = ["base-system"]
