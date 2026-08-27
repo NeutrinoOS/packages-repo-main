@@ -19,8 +19,6 @@ constexpr uint8_t kDhcpMagicCookie[4] = {99, 130, 83, 99};
 constexpr uint8_t kIpv4Zero[4] = {0, 0, 0, 0};
 constexpr uint8_t kIpv4Broadcast[4] = {255, 255, 255, 255};
 constexpr size_t kDhcpBaseSize = 240;
-constexpr size_t kConfigBufferSize = 256;
-constexpr size_t kConfigPathSize = 160;
 constexpr size_t kDhcpPollSpins = 20000;
 constexpr size_t kDhcpRetryBackoffYields = 50000;
 
@@ -198,146 +196,52 @@ bool open_registry(uint32_t& handle, networkd_protocol::Registry*& registry) {
 }
 
 char hex_digit(uint8_t value) {
-    return (value < 10) ? static_cast<char>('0' + value)
-                        : static_cast<char>('a' + (value - 10));
+    return value < 10 ? static_cast<char>('0' + value)
+                      : static_cast<char>('a' + value - 10);
 }
 
-bool build_mount_subpath(const char* mount,
-                         const char* suffix,
-                         char* out,
-                         size_t out_size) {
-    if (mount == nullptr || mount[0] == '\0' || out == nullptr || out_size == 0) {
-        return false;
-    }
-    size_t idx = 0;
-    out[idx++] = '/';
-    for (size_t i = 0; mount[i] != '\0'; ++i) {
-        if (idx + 1 >= out_size) {
-            return false;
-        }
-        out[idx++] = mount[i];
-    }
-    if (suffix != nullptr && suffix[0] != '\0') {
-        if (idx + 1 >= out_size) {
-            return false;
-        }
-        out[idx++] = '/';
-        for (size_t i = 0; suffix[i] != '\0'; ++i) {
-            if (idx + 1 >= out_size) {
-                return false;
-            }
-            out[idx++] = suffix[i];
-        }
-    }
-    out[idx] = '\0';
-    return true;
-}
-
-bool read_file_into_buffer(const char* path,
-                           char* buffer,
-                           size_t buffer_size,
-                           size_t& out_len) {
-    out_len = 0;
-    if (path == nullptr || buffer == nullptr || buffer_size == 0) {
-        return false;
-    }
-    long handle = file_open(path);
-    if (handle < 0) {
-        return false;
-    }
-    size_t total = 0;
-    while (total + 1 < buffer_size) {
-        long read = file_read(static_cast<uint32_t>(handle),
-                              buffer + total,
-                              buffer_size - 1 - total);
-        if (read <= 0) {
-            break;
-        }
-        total += static_cast<size_t>(read);
-    }
-    file_close(static_cast<uint32_t>(handle));
-    buffer[total] = '\0';
-    out_len = total;
-    return true;
-}
-
-bool read_file_from_mounts(const char* suffix,
-                           char* buffer,
-                           size_t buffer_size,
-                           size_t& out_len) {
-    if (read_file_into_buffer(suffix, buffer, buffer_size, out_len)) {
-        return true;
-    }
-    long dir = directory_open("/");
-    if (dir < 0) {
-        return false;
-    }
-    DirEntry entry{};
-    char path[kConfigPathSize];
-    while (directory_read(static_cast<uint32_t>(dir), &entry) > 0) {
-        if (entry.name[0] == '\0') {
-            continue;
-        }
-        if (!build_mount_subpath(entry.name, suffix, path, sizeof(path))) {
-            continue;
-        }
-        if (read_file_into_buffer(path, buffer, buffer_size, out_len)) {
-            directory_close(static_cast<uint32_t>(dir));
-            return true;
-        }
-    }
-    directory_close(static_cast<uint32_t>(dir));
-    return false;
-}
-
-bool interface_uses_static_ipv4(const uint8_t mac[6]) {
-    char path[kConfigPathSize];
-    size_t idx = 0;
-    const char prefix[] = "config/network/";
-    while (prefix[idx] != '\0' && idx + 1 < sizeof(path)) {
-        path[idx] = prefix[idx];
-        ++idx;
-    }
+bool make_static_ipv4_key(const uint8_t mac[6], char* key, size_t key_size) {
+    if (mac == nullptr || key == nullptr || key_size < sizeof("network.ipv4.") + 12) return false;
+    size_t index = 0;
+    const char prefix[] = "network.ipv4.";
+    for (size_t i = 0; prefix[i] != '\0'; ++i) key[index++] = prefix[i];
     for (size_t i = 0; i < 6; ++i) {
-        if (idx + 3 >= sizeof(path)) {
-            return false;
-        }
-        path[idx++] = hex_digit(static_cast<uint8_t>((mac[i] >> 4) & 0x0F));
-        path[idx++] = hex_digit(static_cast<uint8_t>(mac[i] & 0x0F));
-        if (i != 5) {
-            path[idx++] = '-';
-        }
+        key[index++] = hex_digit(static_cast<uint8_t>(mac[i] >> 4));
+        key[index++] = hex_digit(static_cast<uint8_t>(mac[i] & 0x0F));
     }
-    const char suffix[] = "/interface.cfg";
-    for (size_t i = 0; suffix[i] != '\0' && idx + 1 < sizeof(path); ++i) {
-        path[idx++] = suffix[i];
-    }
-    path[idx] = '\0';
+    key[index] = '\0';
+    return true;
+}
 
-    char buffer[kConfigBufferSize];
-    size_t len = 0;
-    if (!read_file_from_mounts(path, buffer, sizeof(buffer), len)) {
-        return false;
+bool parse_ipv4(const char*& text, uint8_t out[4]) {
+    for (size_t part = 0; part < 4; ++part) {
+        uint32_t value = 0;
+        size_t digits = 0;
+        while (*text >= '0' && *text <= '9') {
+            value = value * 10 + static_cast<uint32_t>(*text++ - '0');
+            if (++digits > 3 || value > 255) return false;
+        }
+        if (digits == 0) return false;
+        out[part] = static_cast<uint8_t>(value);
+        if (part != 3 && *text++ != '.') return false;
     }
+    return true;
+}
 
-    const char key[] = "IPV4.ADDRESS";
-    for (size_t i = 0; i < len; ++i) {
-        size_t j = 0;
-        while (key[j] != '\0' && i + j < len && buffer[i + j] == key[j]) {
-            ++j;
-        }
-        if (key[j] != '\0') {
-            continue;
-        }
-        size_t pos = i + j;
-        while (pos < len && (buffer[pos] == ' ' || buffer[pos] == '\t')) {
-            ++pos;
-        }
-        if (pos < len && buffer[pos] == ':') {
-            return true;
-        }
+bool load_static_ipv4_config(const uint8_t mac[6], descriptor_defs::NetIpv4Config& config) {
+    char key[32];
+    char value[80]{};
+    if (!make_static_ipv4_key(mac, key, sizeof(key)) ||
+        machine_settings_get(key, value, sizeof(value)) <= 0) return false;
+    const char* text = value;
+    uint8_t* fields[] = {config.address, config.netmask, config.gateway, config.dns};
+    for (size_t field = 0; field < 4; ++field) {
+        if (!parse_ipv4(text, fields[field])) return false;
+        if (field != 3 && *text++ != ',') return false;
     }
-    return false;
+    if (*text != '\0') return false;
+    config.flags = descriptor_defs::kNetIpv4FlagEnabled;
+    return true;
 }
 
 bool bind_udp(uint32_t server_handle, uint32_t reply_pipe_id, uint16_t port) {
@@ -766,8 +670,15 @@ int main(uint64_t, uint64_t) {
         return 31;
     }
 
-    if (interface_uses_static_ipv4(device.info.mac)) {
-        print_line("dhcp: static IPv4 configured, skipping");
+    descriptor_defs::NetIpv4Config static_config{};
+    if (load_static_ipv4_config(device.info.mac, static_config)) {
+        if (net_device_set_ipv4_config(device.handle, &static_config) != 0) {
+            print_line("dhcp: failed to apply saved static IPv4 configuration");
+            descriptor_close(device.handle);
+            return 1;
+        }
+        print_line("dhcp: applied saved static IPv4 configuration");
+        descriptor_close(device.handle);
         return 0;
     }
 

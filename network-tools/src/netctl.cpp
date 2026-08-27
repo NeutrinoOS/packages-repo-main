@@ -87,6 +87,38 @@ void print_ipv4(const uint8_t bytes[4]) {
     print_u32(bytes[3]);
 }
 
+void append_char(char* buffer, size_t buffer_size, size_t& length, char ch);
+void append_u32(char* buffer, size_t buffer_size, size_t& length, uint32_t value);
+
+bool make_static_ipv4_key(const uint8_t mac[6], char* key, size_t key_size) {
+    if (mac == nullptr || key == nullptr || key_size == 0) return false;
+    size_t length = 0;
+    key[0] = '\0';
+    const char prefix[] = "network.ipv4.";
+    for (size_t i = 0; prefix[i] != '\0'; ++i) append_char(key, key_size, length, prefix[i]);
+    for (size_t i = 0; i < 6; ++i) {
+        append_char(key, key_size, length, hex_digit(static_cast<uint8_t>(mac[i] >> 4)));
+        append_char(key, key_size, length, hex_digit(static_cast<uint8_t>(mac[i] & 0x0F)));
+    }
+    return length + 1 < key_size;
+}
+
+bool make_static_ipv4_value(const descriptor_defs::NetIpv4Config& config,
+                            char* value, size_t value_size) {
+    if (value == nullptr || value_size == 0) return false;
+    size_t length = 0;
+    value[0] = '\0';
+    const uint8_t* fields[] = {config.address, config.netmask, config.gateway, config.dns};
+    for (size_t field = 0; field < 4; ++field) {
+        if (field != 0) append_char(value, value_size, length, ',');
+        for (size_t byte = 0; byte < 4; ++byte) {
+            if (byte != 0) append_char(value, value_size, length, '.');
+            append_u32(value, value_size, length, fields[field][byte]);
+        }
+    }
+    return length + 1 < value_size;
+}
+
 bool parse_u32(const char* text, uint32_t& out) {
     if (text == nullptr || *text == '\0') {
         return false;
@@ -621,7 +653,18 @@ extern "C" int main(uint64_t arg_ptr, uint64_t /*flags*/) {
             print("netctl: set-ip failed\n");
             return 1;
         }
-        print("netctl: ipv4 updated\n");
+        descriptor_defs::NetDeviceInfo info{};
+        char key[32];
+        char value[80];
+        if (net_device_get_info(static_cast<uint32_t>(handle), &info) != 0 ||
+            !make_static_ipv4_key(info.mac, key, sizeof(key)) ||
+            !make_static_ipv4_value(cfg, value, sizeof(value)) ||
+            machine_settings_set(key, value) != 0) {
+            print("netctl: ipv4 updated, but machine setting was not saved\n");
+            descriptor_close(static_cast<uint32_t>(handle));
+            return 1;
+        }
+        print("netctl: ipv4 updated and saved\n");
         descriptor_close(static_cast<uint32_t>(handle));
         return 0;
     }
