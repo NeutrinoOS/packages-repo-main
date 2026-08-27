@@ -3,7 +3,7 @@
 Neutrino userspace package containing:
 
 - `dmesg`, `insmod`, and `lsmod`
-- `lsdisk`, `lspci`, and `sensors`
+- `lscpu`, `lsdisk`, `lspci`, and `sensors`
 - `mkneufs`, `mkpart`, and `mount`
 - `shutdown`, `top`, and `userctl`
 - `tree`
@@ -15,6 +15,9 @@ make package
 ```
 
 The neupak archive is written to `out/system-tools.zip`.
+
+`lscpu` reports the x86_64 CPU identity and the CPUID feature flags exposed by
+the kernel's extensible system-monitor descriptor stream.
 
 `tree` recursively lists the current directory by default. It accepts `-a` to
 include hidden entries, `-d` to show directories only, and `-L depth` to limit
