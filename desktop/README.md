@@ -22,6 +22,9 @@ The taskbar includes a system-volume control. Click `VOL` to mute or unmute,
 or click the slider to choose a level. Standard extended PS/2 media-key
 scancodes for mute, volume down, and volume up are handled globally.
 
+Open applications appear as task buttons between Start and the volume control.
+Click one to bring it forward; `Alt+Tab` cycles focus through open windows.
+
 Bitmap assets that should be installed with the desktop belong in
 `package/share/desktop/bitmaps/`. They are packaged under
 `/share/desktop/bitmaps` and can be addressed at runtime through

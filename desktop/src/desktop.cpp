@@ -107,6 +107,11 @@ uint8_t g_cursor_file[kMaxCursorFileSize]{};
 constexpr int32_t kVolumeWidgetWidth = 136;
 constexpr int32_t kVolumeSliderLeft = 49;
 constexpr int32_t kVolumeSliderWidth = 76;
+constexpr int32_t kTaskbarStartWidth = 92;
+constexpr int32_t kTaskbarAppLeft = 108;
+constexpr int32_t kTaskbarAppGap = 6;
+constexpr int32_t kTaskbarAppMinimumWidth = 72;
+constexpr int32_t kTaskbarAppMaximumWidth = 156;
 
 void copy_text(char* output, size_t capacity, const char* input) {
     if (output == nullptr || capacity == 0) return;
@@ -569,6 +574,18 @@ void draw_text(int32_t x, int32_t y, const char* text, uint32_t foreground,
     }
 }
 
+void draw_text_clipped(int32_t x, int32_t y, const char* text,
+                       uint32_t foreground, int32_t maximum_width,
+                       uint32_t scale = 1) {
+    if (text == nullptr || maximum_width <= 0 || scale == 0) return;
+    const int32_t advance = static_cast<int32_t>(8u * scale);
+    while (*text != '\0' && maximum_width >= advance) {
+        draw_char(x, y, *text++, foreground, scale);
+        x += advance;
+        maximum_width -= advance;
+    }
+}
+
 void draw_frame(int32_t x, int32_t y, int32_t width, int32_t height,
                 uint32_t value) {
     fill_rect(x, y, width, 1, value);
@@ -605,7 +622,8 @@ void draw_window(const Window& window, bool focused) {
     if (focused) fill_rect(window.x, window.y, width, 3, g_theme.accent);
     draw_frame(window.x, window.y, width, height + kTitleHeight,
                neutrino::ui::Palette::outline);
-    draw_text(window.x + 10, window.y + 11, window.title,
+    draw_text(window.x + 10, neutrino::ui::centered_text_y(chrome.titlebar),
+              window.title,
               focused ? neutrino::ui::Palette::chrome_text : 0xc4cdd2);
     fill_rect(chrome.close_button.x, chrome.close_button.y,
               chrome.close_button.width, chrome.close_button.height,
@@ -613,7 +631,8 @@ void draw_window(const Window& window, bool focused) {
     draw_frame(chrome.close_button.x, chrome.close_button.y,
                chrome.close_button.width, chrome.close_button.height,
                neutrino::ui::Palette::outline);
-    draw_text(window.x + width - 21, window.y + 11, "x",
+    draw_text(window.x + width - 21,
+              neutrino::ui::centered_text_y(chrome.close_button), "x",
               neutrino::ui::Palette::chrome_text);
 
     Rect content = chrome.content;
@@ -720,6 +739,45 @@ int32_t volume_widget_x() {
     return static_cast<int32_t>(g_fb.width) - kVolumeWidgetWidth - 8;
 }
 
+int32_t taskbar_app_width() {
+    if (g_windows.empty()) return 0;
+    const int32_t available = volume_widget_x() - kTaskbarAppLeft;
+    const int32_t gaps = static_cast<int32_t>(g_windows.size() - 1) *
+                          kTaskbarAppGap;
+    const int32_t width = (available - gaps) /
+                          static_cast<int32_t>(g_windows.size());
+    if (width < kTaskbarAppMinimumWidth) return 0;
+    return width > kTaskbarAppMaximumWidth ? kTaskbarAppMaximumWidth : width;
+}
+
+size_t taskbar_position(size_t window_index) {
+    if (window_index >= g_windows.size()) return g_windows.size();
+    size_t position = 0;
+    const uint32_t id = g_windows[window_index].id;
+    for (size_t i = 0; i < g_windows.size(); ++i) {
+        if (g_windows[i].id < id) ++position;
+    }
+    return position;
+}
+
+Rect taskbar_app_rect(size_t index, int32_t taskbar_y) {
+    const int32_t width = taskbar_app_width();
+    if (width == 0 || index >= g_windows.size()) return {};
+    return {kTaskbarAppLeft + static_cast<int32_t>(taskbar_position(index)) *
+                                  (width + kTaskbarAppGap),
+            taskbar_y + 8, width,
+            static_cast<int32_t>(g_theme.taskbar_height) - 16};
+}
+
+int32_t taskbar_window_at(int32_t x, int32_t y, int32_t taskbar_y) {
+    for (size_t i = 0; i < g_windows.size(); ++i) {
+        if (neutrino::ui::contains(taskbar_app_rect(i, taskbar_y), x, y)) {
+            return static_cast<int32_t>(i);
+        }
+    }
+    return -1;
+}
+
 void render(Rect damage) {
     damage = clipped(damage);
     if (damage.width <= 0 || damage.height <= 0) return;
@@ -743,19 +801,40 @@ void render(Rect damage) {
     fill_rect(0, taskbar_y, static_cast<int32_t>(g_fb.width),
               static_cast<int32_t>(g_theme.taskbar_height), g_theme.taskbar);
     fill_rect(0, taskbar_y, static_cast<int32_t>(g_fb.width), 1, g_theme.accent);
-    fill_rect(8, taskbar_y + 8, 92,
-              static_cast<int32_t>(g_theme.taskbar_height) - 16, g_theme.accent);
-    draw_frame(8, taskbar_y + 8, 92,
-               static_cast<int32_t>(g_theme.taskbar_height) - 16,
+    const Rect start_button{8, taskbar_y + 8, kTaskbarStartWidth,
+                            static_cast<int32_t>(g_theme.taskbar_height) - 16};
+    fill_rect(start_button.x, start_button.y, start_button.width,
+              start_button.height,
+              g_theme.accent);
+    draw_frame(start_button.x, start_button.y, start_button.width,
+               start_button.height,
                neutrino::ui::Palette::outline);
-    draw_text(18, taskbar_y + 20, "NEUTRINO",
+    draw_text(18, neutrino::ui::centered_text_y(start_button), "NEUTRINO",
               neutrino::ui::Palette::ink);
+    for (size_t i = 0; i < g_windows.size(); ++i) {
+        const Rect app = taskbar_app_rect(i, taskbar_y);
+        if (app.width == 0) break;
+        const bool focused = i + 1 == g_windows.size();
+        fill_rect(app.x, app.y, app.width, app.height,
+                  focused ? g_theme.panel : 0x2b3943);
+        draw_frame(app.x, app.y, app.width, app.height,
+                   focused ? g_theme.accent : 0x52616b);
+        fill_rect(app.x + 7, app.y + 10, 10, 10,
+                  focused ? g_theme.accent : 0x71818b);
+        draw_text_clipped(app.x + 24, neutrino::ui::centered_text_y(app),
+                          g_windows[i].title,
+                          focused ? neutrino::ui::Palette::ink
+                                  : neutrino::ui::Palette::chrome_text,
+                          app.width - 30);
+    }
     const int32_t volume_x = volume_widget_x();
-    fill_rect(volume_x, taskbar_y + 8, kVolumeWidgetWidth,
-              static_cast<int32_t>(g_theme.taskbar_height) - 16, 0x2b3943);
-    draw_frame(volume_x, taskbar_y + 8, kVolumeWidgetWidth,
-               static_cast<int32_t>(g_theme.taskbar_height) - 16, 0x52616b);
-    draw_text(volume_x + 8, taskbar_y + 20, "VOL",
+    const Rect volume_widget{volume_x, taskbar_y + 8, kVolumeWidgetWidth,
+                             static_cast<int32_t>(g_theme.taskbar_height) - 16};
+    fill_rect(volume_widget.x, volume_widget.y, volume_widget.width,
+              volume_widget.height, 0x2b3943);
+    draw_frame(volume_widget.x, volume_widget.y, volume_widget.width,
+               volume_widget.height, 0x52616b);
+    draw_text(volume_x + 8, neutrino::ui::centered_text_y(volume_widget), "VOL",
               neutrino::ui::Palette::chrome_text);
     fill_rect(volume_x + kVolumeSliderLeft, taskbar_y + 18,
               kVolumeSliderWidth, 8, 0x16232b);
@@ -767,7 +846,7 @@ void render(Rect damage) {
     }
     char volume_text[5]{};
     decimal_text(volume_text, sizeof(volume_text), g_volume);
-    draw_text(volume_x + 101, taskbar_y + 20, volume_text,
+    draw_text(volume_x + 101, neutrino::ui::centered_text_y(volume_widget), volume_text,
               neutrino::ui::Palette::chrome_text);
     for (size_t i = 0; i < g_windows.size(); ++i) {
         draw_window(g_windows[i], i + 1 == g_windows.size());
@@ -779,19 +858,24 @@ void render(Rect damage) {
                   neutrino::ui::Palette::shadow);
         fill_rect(8, menu_y, 220, menu_height, g_theme.panel);
         draw_frame(8, menu_y, 220, menu_height, neutrino::ui::Palette::outline);
-        fill_rect(9, menu_y + 1, 218, 30, g_theme.title);
+        const Rect menu_header{9, menu_y + 1, 218, 30};
+        fill_rect(menu_header.x, menu_header.y, menu_header.width,
+                  menu_header.height, g_theme.title);
         fill_rect(9, menu_y + 1, 218, 3, g_theme.accent);
-        draw_text(20, menu_y + 12, "Applications",
+        draw_text(20, neutrino::ui::centered_text_y(menu_header), "Applications",
                   neutrino::ui::Palette::chrome_text);
         if (g_launcher_count == 0) {
-            draw_text(28, menu_y + 51, "No applications configured",
+            const Rect empty_message{17, menu_y + 40, 202, 37};
+            draw_text(28, neutrino::ui::centered_text_y(empty_message),
+                      "No applications configured",
                       neutrino::ui::Palette::ink);
         }
         for (size_t i = 0; i < g_launcher_count; ++i) {
             int32_t item_y = menu_y + 40 + static_cast<int32_t>(i) * 37;
-            fill_rect(17, item_y, 202, 37, 0xdfe8ed);
-            draw_frame(17, item_y, 202, 37, 0xaab8c1);
-            draw_text(28, item_y + 15, g_launchers[i].label,
+            const Rect item{17, item_y, 202, 37};
+            fill_rect(item.x, item.y, item.width, item.height, 0xdfe8ed);
+            draw_frame(item.x, item.y, item.width, item.height, 0xaab8c1);
+            draw_text(28, neutrino::ui::centered_text_y(item), g_launchers[i].label,
                       neutrino::ui::Palette::ink);
         }
     }
@@ -828,6 +912,13 @@ void remove_window(uint32_t index) {
     descriptor_close(g_windows[index].surface_handle);
     SceneDamage damage;
     (void)g_windows.erase(index, window_damage_rect, damage);
+    // Window creation/removal changes task-button count, widths, and focus.
+    // Invalidate the whole bar rather than waiting for an unrelated pointer
+    // repaint to reveal the new layout.
+    damage.invalidate({0, static_cast<int32_t>(g_fb.height -
+                                               g_theme.taskbar_height),
+                       static_cast<int32_t>(g_fb.width),
+                       static_cast<int32_t>(g_theme.taskbar_height)});
     render_damage(damage);
 }
 
@@ -918,6 +1009,12 @@ void handle_create(const desktop_protocol::CreateMessage& message) {
         descriptor_close(window.event_pipe);
         return;
     }
+    // A new top-level window immediately owns a task button and changes the
+    // sizing of every existing one.
+    damage.invalidate({0, static_cast<int32_t>(g_fb.height -
+                                               g_theme.taskbar_height),
+                       static_cast<int32_t>(g_fb.width),
+                       static_cast<int32_t>(g_theme.taskbar_height)});
     response.header.window_id = window.id;
     response.header.token = window.token;
     response.status = 0;
@@ -1090,6 +1187,24 @@ bool handle_keyboard(uint32_t keyboard) {
             render({8, start_menu_y(taskbar_y), 220, start_menu_height()});
             continue;
         }
+        if (pressed && events[i].scancode == 0x0f &&
+            (events[i].mods & descriptor_defs::kKeyboardModAlt) != 0 &&
+            g_windows.size() > 1) {
+            SceneDamage focus_damage;
+            // The stack is ordered back-to-front. Moving its backmost window
+            // forward rotates every open application through focus instead of
+            // merely toggling between the two most recently focused windows.
+            (void)g_windows.raise(0, window_damage_rect, focus_damage);
+            Rect damage{0, static_cast<int32_t>(g_fb.height -
+                                                g_theme.taskbar_height),
+                        static_cast<int32_t>(g_fb.width),
+                        static_cast<int32_t>(g_theme.taskbar_height)};
+            for (size_t j = 0; j < focus_damage.size(); ++j) {
+                damage = unite(damage, focus_damage[j]);
+            }
+            render(damage);
+            continue;
+        }
         Window* focused = g_windows.focused();
         if (focused == nullptr) continue;
         desktop_protocol::KeyboardMessage message{
@@ -1131,7 +1246,7 @@ void handle_mouse(uint32_t mouse) {
         int32_t taskbar_y =
             static_cast<int32_t>(g_fb.height - g_theme.taskbar_height);
         if (left_pressed && g_cursor_y >= taskbar_y + 7) {
-            if (g_cursor_x >= 8 && g_cursor_x < 100) {
+            if (g_cursor_x >= 8 && g_cursor_x < 8 + kTaskbarStartWidth) {
                 g_menu_open = !g_menu_open;
                 damage = unite(damage, {8, start_menu_y(taskbar_y), 220,
                                         start_menu_height() +
@@ -1150,6 +1265,20 @@ void handle_mouse(uint32_t mouse) {
                 damage = unite(damage, {volume_widget_x(), taskbar_y,
                                         kVolumeWidgetWidth,
                                         static_cast<int32_t>(g_theme.taskbar_height)});
+            } else {
+                const int32_t index = taskbar_window_at(g_cursor_x, g_cursor_y,
+                                                        taskbar_y);
+                if (index >= 0) {
+                    SceneDamage focus_damage;
+                    (void)g_windows.raise(static_cast<size_t>(index),
+                                          window_damage_rect, focus_damage);
+                    damage = unite(damage, {kTaskbarAppLeft, taskbar_y,
+                                             volume_widget_x() - kTaskbarAppLeft,
+                                             static_cast<int32_t>(g_theme.taskbar_height)});
+                    for (size_t j = 0; j < focus_damage.size(); ++j) {
+                        damage = unite(damage, focus_damage[j]);
+                    }
+                }
             }
         } else if (left_pressed && g_menu_open && g_cursor_x >= 17 &&
                    g_cursor_x < 219) {
