@@ -115,6 +115,13 @@ enum class SystemCall : long {
     ModuleLoad            = 90,
     ModuleCount           = 91,
     ModuleInfo            = 92,
+    SettingsGet           = 93,
+    SettingsSet           = 94,
+    MachineSettingsGet    = 95,
+    MachineSettingsSet    = 96,
+    SettingsKeyAt         = 97,
+    MachineSettingsKeyAt  = 98,
+    MachineSettingsAccess = 99,
 };
 
 enum : uint32_t {
@@ -1159,6 +1166,61 @@ static inline long file_sync(uint32_t handle) {
 
 static inline long system_sync() {
     return raw_syscall0(SystemCall::Sync);
+}
+
+// Reads the authenticated caller's private settings hive. Passing nullptr and
+// zero queries the required buffer size, including the terminating NUL.
+static inline long settings_get(const char* key,
+                                char* value = nullptr,
+                                size_t value_size = 0) {
+    if (key == nullptr || (value == nullptr && value_size != 0)) {
+        return -1;
+    }
+    return raw_syscall3(SystemCall::SettingsGet,
+                        reinterpret_cast<long>(key),
+                        reinterpret_cast<long>(value),
+                        static_cast<long>(value_size));
+}
+
+// Changes and persists the authenticated caller's private settings hive.
+static inline long settings_set(const char* key, const char* value) {
+    return key == nullptr || value == nullptr
+               ? -1
+               : raw_syscall2(SystemCall::SettingsSet,
+                              reinterpret_cast<long>(key),
+                              reinterpret_cast<long>(value));
+}
+
+static inline long settings_key_at(size_t index, char* key = nullptr,
+                                   size_t key_size = 0) {
+    return key == nullptr && key_size != 0 ? -1 : raw_syscall3(
+        SystemCall::SettingsKeyAt, static_cast<long>(index),
+        reinterpret_cast<long>(key), static_cast<long>(key_size));
+}
+
+// Machine settings require SystemReadSettings (or SystemWriteSettings); writes
+// require SystemWriteSettings.
+static inline long machine_settings_get(const char* key,
+                                        char* value = nullptr,
+                                        size_t value_size = 0) {
+    if (key == nullptr || (value == nullptr && value_size != 0)) return -1;
+    return raw_syscall3(SystemCall::MachineSettingsGet,
+                        reinterpret_cast<long>(key), reinterpret_cast<long>(value),
+                        static_cast<long>(value_size));
+}
+static inline long machine_settings_set(const char* key, const char* value) {
+    return key == nullptr || value == nullptr ? -1 :
+        raw_syscall2(SystemCall::MachineSettingsSet, reinterpret_cast<long>(key),
+                     reinterpret_cast<long>(value));
+}
+static inline long machine_settings_key_at(size_t index, char* key = nullptr,
+                                           size_t key_size = 0) {
+    return key == nullptr && key_size != 0 ? -1 : raw_syscall3(
+        SystemCall::MachineSettingsKeyAt, static_cast<long>(index),
+        reinterpret_cast<long>(key), static_cast<long>(key_size));
+}
+static inline long machine_settings_access() {
+    return raw_syscall0(SystemCall::MachineSettingsAccess);
 }
 
 static inline long system_shutdown() {

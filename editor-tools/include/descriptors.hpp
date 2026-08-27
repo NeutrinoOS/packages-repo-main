@@ -21,11 +21,13 @@ enum class Type : uint16_t {
     CpuStats    = 0x060,
     TaskStats   = 0x061,
     KernelLog   = 0x062,
+    CpuInfo     = 0x063,
     NetDevice   = 0x070,
     NetEndpoint = 0x071,
     Pci         = 0x080,
     AudioOutput = 0x090,
     Sensor      = 0x0A0,
+    ServiceRegistry = 0x0B0,
 };
 
 enum class Flag : uint64_t {
@@ -53,6 +55,7 @@ enum class Property : uint32_t {
     ConsoleCursorBlink= 0x0000000A,
     FramebufferInfo   = 0x00010001,
     FramebufferPresent= 0x00010002,
+    FramebufferFill   = 0x00010003,
     GraphicalSessionInfo = 0x00011001,
     GraphicalSessionControl = 0x00011002,
     BlockGeometry     = 0x00020001,
@@ -76,6 +79,9 @@ enum class Property : uint32_t {
     AudioStatus       = 0x00080002,
     AudioControl      = 0x00080003,
     SensorInfo        = 0x00090001,
+    ServiceRegister   = 0x000A0001,
+    ServiceUnregister = 0x000A0002,
+    ServiceBinding    = 0x000A0003,
 };
 
 enum class SensorKind : uint16_t {
@@ -190,6 +196,8 @@ struct FramebufferRect {
     uint32_t height;
 };
 
+struct FramebufferFill { uint32_t x, y, width, height, color; };
+
 // Versioned kernel contract held by the trusted userspace display/session
 // service. The descriptor is the capability: its owner may activate only the
 // display slot assigned here and receives input for that same slot.
@@ -263,6 +271,35 @@ struct PipeInfo {
     uint32_t id;
     uint32_t flags;
 };
+
+constexpr size_t kServiceIdLength = 64;
+constexpr size_t kServiceProviderLength = 32;
+
+struct ServiceOffer {
+    char service[kServiceIdLength];
+    char provider[kServiceProviderLength];
+    uint32_t abi_version;
+    uint32_t pipe_id;
+};
+
+struct ServiceQuery {
+    char service[kServiceIdLength];
+    uint32_t abi_version;
+    uint32_t reserved;
+};
+
+struct ServiceBinding {
+    char service[kServiceIdLength];
+    char provider[kServiceProviderLength];
+    uint32_t abi_version;
+    uint32_t pipe_id;
+    uint32_t provider_pid;
+    uint32_t reserved;
+};
+
+static_assert(sizeof(ServiceOffer) == 104, "ServiceOffer size mismatch");
+static_assert(sizeof(ServiceQuery) == 72, "ServiceQuery size mismatch");
+static_assert(sizeof(ServiceBinding) == 112, "ServiceBinding size mismatch");
 
 struct MouseEvent {
     int8_t dx;
@@ -345,6 +382,55 @@ struct CpuUsage {
     uint64_t idle_ticks;
     uint64_t irq_ticks;
 };
+
+// Feature numbers are stable, but their bitmap is intentionally not embedded
+// in CpuInfo. Read the descriptor after its fixed CpuInfo header to obtain
+// ceil(feature_count / 8) bitmap bytes. A set bit means the processor
+// advertised the feature through CPUID; it does not promise that Neutrino
+// currently enables every optional feature for userspace.
+enum CpuFeature : uint32_t {
+    kCpuFeatureFpu = 0,
+    kCpuFeatureTsc,
+    kCpuFeatureMsr,
+    kCpuFeatureApic,
+    kCpuFeaturePge,
+    kCpuFeatureMmx,
+    kCpuFeatureFxsr,
+    kCpuFeatureSse,
+    kCpuFeatureSse2,
+    kCpuFeatureSse3,
+    kCpuFeatureSsse3,
+    kCpuFeatureSse4_1,
+    kCpuFeatureSse4_2,
+    kCpuFeatureXsave,
+    kCpuFeatureAvx,
+    kCpuFeatureAes,
+    kCpuFeaturePclmulqdq,
+    kCpuFeatureRdrand,
+    kCpuFeatureFsgsbase,
+    kCpuFeatureSmep,
+    kCpuFeatureSmap,
+    kCpuFeatureInvpcid,
+    kCpuFeatureRdseed,
+    kCpuFeature1GiBPages,
+    kCpuFeatureNx,
+    kCpuFeatureSyscall,
+    kCpuFeatureCount,
+};
+
+struct CpuInfo {
+    char architecture[16];
+    char vendor_id[16];
+    char model_name[64];
+    uint32_t family;
+    uint32_t model;
+    uint32_t stepping;
+    uint32_t logical_cpus;
+    uint32_t feature_count;
+    uint32_t reserved;
+};
+
+static_assert(sizeof(CpuInfo) == 120, "CpuInfo size mismatch");
 
 enum TaskStatFlag : uint32_t {
     kTaskStatFlagKernel = 1u << 0,

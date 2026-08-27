@@ -115,6 +115,8 @@ enum class SystemCall : long {
     ModuleLoad            = 90,
     ModuleCount           = 91,
     ModuleInfo            = 92,
+    SettingsGet           = 93,
+    SettingsSet           = 94,
 };
 
 enum : uint32_t {
@@ -1159,6 +1161,30 @@ static inline long file_sync(uint32_t handle) {
 
 static inline long system_sync() {
     return raw_syscall0(SystemCall::Sync);
+}
+
+// Reads a global setting. Passing nullptr and zero queries the required buffer
+// size, including the terminating NUL. Requires the SystemSettings capability.
+static inline long settings_get(const char* key,
+                                char* value = nullptr,
+                                size_t value_size = 0) {
+    if (key == nullptr || (value == nullptr && value_size != 0)) {
+        return -1;
+    }
+    return raw_syscall3(SystemCall::SettingsGet,
+                        reinterpret_cast<long>(key),
+                        reinterpret_cast<long>(value),
+                        static_cast<long>(value_size));
+}
+
+// Changes and persists a global setting. Requires the SystemSettings
+// capability.
+static inline long settings_set(const char* key, const char* value) {
+    return key == nullptr || value == nullptr
+               ? -1
+               : raw_syscall2(SystemCall::SettingsSet,
+                              reinterpret_cast<long>(key),
+                              reinterpret_cast<long>(value));
 }
 
 static inline long system_shutdown() {
