@@ -185,9 +185,60 @@ extern "C" int neutrino_render_fill(int context, uint64_t fence, uint64_t byte_o
             &fill, sizeof(fill)) == 0 ? 0 : -1);
 }
 
+extern "C" int neutrino_render_fill_bo(int context, uint32_t handle, uint64_t fence,
+                                        uint64_t byte_offset, uint32_t pitch, uint32_t x,
+                                        uint32_t y, uint32_t width, uint32_t height, uint32_t color) {
+    const neutrino_render::Fill2 fill{handle, 0, {fence, byte_offset, pitch, x, y, width, height, color, 0}};
+    return context < 0 ? -1 : (descriptor_set_property(static_cast<uint32_t>(context),
+        static_cast<uint32_t>(neutrino_render::Property::SubmitFill2), &fill, sizeof(fill)) == 0 ? 0 : -1);
+}
+
 extern "C" uint64_t neutrino_render_completed_fence(int context) {
     neutrino_render::Info info{};
     return context < 0 || descriptor_get_property(static_cast<uint32_t>(context),
         static_cast<uint32_t>(neutrino_render::Property::Info), &info, sizeof(info)) != 0
         ? 0 : info.completed_fence;
+}
+
+extern "C" int neutrino_render_create_bo(int context, uint32_t handle, size_t bytes) {
+    const neutrino_render::BufferCreate request{handle, 0, static_cast<uint64_t>(bytes)};
+    return context < 0 ? -1 : (descriptor_set_property(static_cast<uint32_t>(context),
+        static_cast<uint32_t>(neutrino_render::Property::CreateBuffer), &request, sizeof(request)) == 0 ? 0 : -1);
+}
+
+extern "C" int neutrino_render_destroy_bo(int context, uint32_t handle) {
+    const neutrino_render::BufferDestroy request{handle, 0};
+    return context < 0 ? -1 : (descriptor_set_property(static_cast<uint32_t>(context),
+        static_cast<uint32_t>(neutrino_render::Property::DestroyBuffer), &request, sizeof(request)) == 0 ? 0 : -1);
+}
+
+extern "C" void* neutrino_render_map_bo(int context, uint32_t handle, size_t* bytes, uint64_t* gpu_va) {
+    if (context < 0 || handle == 0 || handle > 4) return nullptr;
+    neutrino_render::BufferInfo info{};
+    uint32_t property = static_cast<uint32_t>(neutrino_render::Property::BufferInfo0) + handle - 1;
+    if (descriptor_get_property(static_cast<uint32_t>(context), property, &info, sizeof(info)) != 0 ||
+        info.handle != handle || info.virtual_base == 0) return nullptr;
+    if (bytes != nullptr) *bytes = static_cast<size_t>(info.byte_length);
+    if (gpu_va != nullptr) *gpu_va = info.gpu_va;
+    return reinterpret_cast<void*>(info.virtual_base);
+}
+
+extern "C" int neutrino_render_fence_status(int context, uint64_t* submitted,
+                                               uint64_t* completed, int* state, int* error) {
+    neutrino_render::FenceInfo info{};
+    if (context < 0 || descriptor_get_property(static_cast<uint32_t>(context),
+        static_cast<uint32_t>(neutrino_render::Property::FenceInfo), &info, sizeof(info)) != 0) return -1;
+    if (submitted != nullptr) *submitted = info.submitted_fence;
+    if (completed != nullptr) *completed = info.completed_fence;
+    if (state != nullptr) *state = static_cast<int>(info.state);
+    if (error != nullptr) *error = info.error;
+    return 0;
+}
+
+extern "C" int neutrino_render_wait_fence(int context, uint64_t fence,
+                                            uint64_t timeout_ticks) {
+    const neutrino_render::FenceWait request{fence, timeout_ticks, 0, 0};
+    return context < 0 ? -1 : (descriptor_set_property(static_cast<uint32_t>(context),
+        static_cast<uint32_t>(neutrino_render::Property::WaitFence),
+        &request, sizeof(request)) == 0 ? 0 : -1);
 }

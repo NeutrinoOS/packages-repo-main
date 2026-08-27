@@ -70,6 +70,8 @@ constexpr size_t kPageSize = 4096;
 constexpr size_t kMmioMapSize = 2ull * 1024 * 1024;
 constexpr size_t kBltRingSize = 16ull * 1024;
 constexpr size_t kBltHwspSize = kPageSize;
+constexpr size_t kRenderBindingCount = 16;
+constexpr size_t kRenderBindingBytes = 4ull * 1024 * 1024;
 constexpr size_t kGgttTableOffset = 2ull * 1024 * 1024;
 constexpr uint32_t kBltRingBase = 0x22000;
 constexpr uint32_t kRingTail = 0x30;
@@ -174,6 +176,7 @@ struct DriverState {
     size_t blt_source_page_capacity;
     volatile uint32_t* blt_ring_cpu;
     uint32_t blt_ring_tail;
+    uint32_t blt_reset_count;
     uint16_t command;
     PipeState pipes[3];
     PlaneState planes[3];
@@ -181,6 +184,13 @@ struct DriverState {
 };
 
 DriverState g_state{};
+struct RenderBinding {
+    volatile uint64_t* ptes;
+    size_t page_count;
+    uint64_t gpu_va;
+    bool used;
+};
+RenderBinding g_render_bindings[kRenderBindingCount]{};
 uint64_t g_map_next_virt = kMapVirtBase;
 bool g_disabled = false;
 
@@ -406,11 +416,13 @@ bool setup_blt_engine() {
 
     const size_t hwsp_pages = kBltHwspSize / kPageSize;
     const size_t ring_pages = kBltRingSize / kPageSize;
-    g_state.blt_hwsp_phys = memory::alloc_kernel_block_pages(hwsp_pages);
-    g_state.blt_ring_phys = memory::alloc_kernel_block_pages(ring_pages);
     if (g_state.blt_hwsp_phys == 0 || g_state.blt_ring_phys == 0) {
-        log_message(LogLevel::Warn, "intel-uhd: failed to allocate BLT backing pages");
-        return false;
+        g_state.blt_hwsp_phys = memory::alloc_kernel_block_pages(hwsp_pages);
+        g_state.blt_ring_phys = memory::alloc_kernel_block_pages(ring_pages);
+        if (g_state.blt_hwsp_phys == 0 || g_state.blt_ring_phys == 0) {
+            log_message(LogLevel::Warn, "intel-uhd: failed to allocate BLT backing pages");
+            return false;
+        }
     }
 
     auto* hwsp = static_cast<uint8_t*>(paging_phys_to_virt(g_state.blt_hwsp_phys));
@@ -461,7 +473,9 @@ bool ensure_blt_source_window(size_t page_count) {
     }
 
     const uint64_t source_ggtt = align_up_u64(
-        g_state.blt_ring_ggtt + kBltRingSize, kPageSize);
+        g_state.blt_ring_ggtt + kBltRingSize +
+            kRenderBindingCount * kRenderBindingBytes,
+        kPageSize);
     const uint64_t source_bytes = static_cast<uint64_t>(page_count) * kPageSize;
     if (source_ggtt > g_state.aperture_size ||
         source_bytes > g_state.aperture_size - source_ggtt ||
@@ -487,6 +501,53 @@ bool ensure_blt_source_window(size_t page_count) {
     return true;
 }
 
+bool bind_render_surface(const render_accel::Surface& surface,
+                         uint64_t& out_gpu_va) {
+    out_gpu_va = 0;
+    if (!g_state.active || !setup_blt_engine() ||
+        surface.physical_pages == nullptr || surface.physical_page_count == 0 ||
+        surface.byte_length == 0 || surface.byte_length > kRenderBindingBytes ||
+        surface.physical_page_count > kRenderBindingBytes / kPageSize) return false;
+    size_t slot = kRenderBindingCount;
+    for (size_t i = 0; i < kRenderBindingCount; ++i)
+        if (!g_render_bindings[i].used) { slot = i; break; }
+    if (slot == kRenderBindingCount) return false;
+    const uint64_t base = align_up_u64(g_state.blt_ring_ggtt + kBltRingSize,
+                                       kPageSize) + slot * kRenderBindingBytes;
+    if (base > g_state.aperture_size ||
+        kRenderBindingBytes > g_state.aperture_size - base ||
+        base / kPageSize > UINT64_MAX / sizeof(uint64_t)) return false;
+    for (size_t i = 0; i < surface.physical_page_count; ++i) {
+        const uint64_t page = surface.physical_pages[i];
+        if (page == 0 || (page & (kPageSize - 1)) != 0) return false;
+    }
+    auto* ptes = reinterpret_cast<volatile uint64_t*>(map_physical_range(
+        g_state.ggtt_table_phys + (base / kPageSize) * sizeof(uint64_t),
+        surface.physical_page_count * sizeof(uint64_t),
+        PAGE_FLAG_WRITE | PAGE_FLAG_WRITE_THROUGH | PAGE_FLAG_CACHE_DISABLE,
+        "render GGTT"));
+    if (ptes == nullptr) return false;
+    for (size_t i = 0; i < surface.physical_page_count; ++i)
+        ptes[i] = surface.physical_pages[i] | kGen8GgttPagePresent;
+    mmio_write32(kGfxFlushCntlGen6, kGfxFlushCntlEn);
+    (void)mmio_read32(kGfxFlushCntlGen6);
+    g_render_bindings[slot] = {ptes, surface.physical_page_count, base, true};
+    out_gpu_va = base;
+    return true;
+}
+
+void unbind_render_surface(uint64_t gpu_va) {
+    for (size_t i = 0; i < kRenderBindingCount; ++i) {
+        RenderBinding& binding = g_render_bindings[i];
+        if (!binding.used || binding.gpu_va != gpu_va) continue;
+        for (size_t page = 0; page < binding.page_count; ++page) binding.ptes[page] = 0;
+        mmio_write32(kGfxFlushCntlGen6, kGfxFlushCntlEn);
+        (void)mmio_read32(kGfxFlushCntlGen6);
+        binding = {};
+        return;
+    }
+}
+
 bool submit_blt_commands(const uint32_t* commands, size_t dword_count) {
     if (commands == nullptr || dword_count == 0 || g_state.blt_ring_cpu == nullptr) {
         return false;
@@ -497,6 +558,12 @@ bool submit_blt_commands(const uint32_t* commands, size_t dword_count) {
     }
     if (g_state.blt_ring_tail + bytes > kBltRingSize) {
         if (!wait_for_blt_idle()) {
+            // The caller will fall back to CPU presentation/submission.  Do
+            // not append new work to a ring whose head has stopped moving.
+            mmio_write32(kBltRingBase + kRingMiMode,
+                         mmio_read32(kBltRingBase + kRingMiMode) | kRingStop);
+            mmio_write32(kBltRingBase + kRingCtl, 0);
+            g_state.blt_ready = false;
             return false;
         }
         mmio_write32(kBltRingBase + kRingHead, 0);
@@ -511,6 +578,19 @@ bool submit_blt_commands(const uint32_t* commands, size_t dword_count) {
     mmio_write32(kBltRingBase + kRingTail, g_state.blt_ring_tail);
     if (!wait_for_blt_idle()) {
         log_message(LogLevel::Warn, "intel-uhd: BLT command timed out");
+        // BCS-only recovery: quiesce the ring, discard its in-flight tail,
+        // and let setup_blt_engine reprogram the ring/HWS on the next use.
+        // This is intentionally not a global GT reset; render/video engines
+        // have not been initialized by this driver and must not be disturbed.
+        mmio_write32(kBltRingBase + kRingMiMode,
+                     mmio_read32(kBltRingBase + kRingMiMode) | kRingStop);
+        mmio_write32(kBltRingBase + kRingCtl, 0);
+        (void)mmio_read32(kBltRingBase + kRingCtl);
+        mmio_write32(kBltRingBase + kRingHead, 0);
+        mmio_write32(kBltRingBase + kRingTail, 0);
+        g_state.blt_ring_tail = 0;
+        g_state.blt_ready = false;
+        ++g_state.blt_reset_count;
         return false;
     }
     return true;
@@ -622,6 +702,7 @@ bool fill_framebuffer(const display_accel::Surface& target,
 // already validated the byte range and owns all GGTT mappings; userspace never
 // supplies a GPU batch or GPU virtual address.
 bool render_fill(const render_accel::Surface& target,
+                 uint64_t gpu_va,
                  uint64_t byte_offset,
                  uint32_t pitch_bytes,
                  uint32_t x,
@@ -630,7 +711,7 @@ bool render_fill(const render_accel::Surface& target,
                  uint32_t height,
                  uint32_t color) {
     if (!g_state.active || target.physical_pages == nullptr ||
-        target.physical_page_count == 0 ||
+        target.physical_page_count == 0 || gpu_va == 0 ||
         byte_offset > target.byte_length || (byte_offset & (kPageSize - 1)) != 0 ||
         pitch_bytes == 0 || pitch_bytes > 0xFFFFu || width == 0 || height == 0 ||
         x > pitch_bytes / 4 || width > pitch_bytes / 4 - x ||
@@ -638,12 +719,8 @@ bool render_fill(const render_accel::Surface& target,
         !setup_blt_engine()) return false;
     const size_t pages = (target.byte_length + kPageSize - 1) / kPageSize;
     if (pages == 0 || pages > target.physical_page_count ||
-        !ensure_blt_source_window(pages)) return false;
-    for (size_t i = 0; i < pages; ++i) {
-        const uint64_t page = target.physical_pages[i];
-        if (page == 0 || (page & (kPageSize - 1)) != 0) return false;
-        g_state.blt_source_ptes[i] = page | kGen8GgttPagePresent;
-    }
+        gpu_va > g_state.aperture_size ||
+        target.byte_length > g_state.aperture_size - gpu_va) return false;
     mmio_write32(kGfxFlushCntlGen6, kGfxFlushCntlEn);
     (void)mmio_read32(kGfxFlushCntlGen6);
     uint32_t commands[7]{};
@@ -651,7 +728,7 @@ bool render_fill(const render_accel::Surface& target,
     commands[1] = kBltDepth32 | kBltRopSrcCopy | pitch_bytes;
     commands[2] = (y << 16) | x;
     commands[3] = ((y + height) << 16) | (x + width);
-    const uint64_t destination = g_state.blt_source_ggtt + byte_offset;
+    const uint64_t destination = gpu_va + byte_offset;
     commands[4] = static_cast<uint32_t>(destination & 0xFFFFFFFFu);
     commands[5] = static_cast<uint32_t>(destination >> 32);
     commands[6] = color;
@@ -1184,7 +1261,11 @@ bool register_framebuffer_acceleration() {
         .present = present_framebuffer,
         .fill = fill_framebuffer,
     };
-    const render_accel::Ops render_ops{.fill = render_fill};
+    const render_accel::Ops render_ops{
+        .fill = render_fill,
+        .bind = bind_render_surface,
+        .unbind = unbind_render_surface,
+    };
     const bool display_registered = neutrino_register_framebuffer_presenter(&ops);
     const bool render_registered = neutrino_register_render_accelerator(&render_ops);
     return display_registered || render_registered;
