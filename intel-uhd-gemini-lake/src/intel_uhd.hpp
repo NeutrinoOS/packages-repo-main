@@ -15,4 +15,8 @@ bool blit_copy(unsigned int src_x,
                unsigned int height,
                unsigned int pitch_bytes);
 
+// Registers this driver's scanout presenter with the kernel.  Presentation
+// falls back to the CPU whenever the BLT engine or a surface is unsupported.
+bool register_framebuffer_acceleration();
+
 }  // namespace intel_uhd

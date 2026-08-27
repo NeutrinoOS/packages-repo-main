@@ -6,6 +6,8 @@
 #include "arch/x86_64/memory/paging.hpp"
 #include "drivers/console/console.hpp"
 #include "drivers/driver_registry.hpp"
+#include "drivers/display_accel.hpp"
+#include "drivers/render_accel.hpp"
 #include "drivers/log/logging.hpp"
 #include "drivers/pci/pci.hpp"
 #include "kernel/cmdline.hpp"
@@ -68,6 +70,7 @@ constexpr size_t kPageSize = 4096;
 constexpr size_t kMmioMapSize = 2ull * 1024 * 1024;
 constexpr size_t kBltRingSize = 16ull * 1024;
 constexpr size_t kBltHwspSize = kPageSize;
+constexpr size_t kGgttTableOffset = 2ull * 1024 * 1024;
 constexpr uint32_t kBltRingBase = 0x22000;
 constexpr uint32_t kRingTail = 0x30;
 constexpr uint32_t kRingHead = 0x34;
@@ -85,6 +88,7 @@ constexpr uint32_t kGfxFlushCntlGen6 = 0x101008;
 constexpr uint32_t kGfxFlushCntlEn = 1u << 0;
 constexpr uint32_t kMiNoop = 0x00000000u;
 constexpr uint32_t kXySrcCopyBltCmd = (2u << 29) | (0x53u << 22);
+constexpr uint32_t kXyColorBltCmd = (2u << 29) | (0x50u << 22);
 constexpr uint32_t kBltWriteRgba = (1u << 20) | (2u << 20);
 constexpr uint32_t kBltDepth32 = 3u << 24;
 constexpr uint32_t kBltRopSrcCopy = 0xCCu << 16;
@@ -165,6 +169,9 @@ struct DriverState {
     uint64_t blt_ring_phys;
     uint64_t blt_hwsp_ggtt;
     uint64_t blt_ring_ggtt;
+    uint64_t blt_source_ggtt;
+    volatile uint64_t* blt_source_ptes;
+    size_t blt_source_page_capacity;
     volatile uint32_t* blt_ring_cpu;
     uint32_t blt_ring_tail;
     uint16_t command;
@@ -443,6 +450,43 @@ bool setup_blt_engine() {
     return true;
 }
 
+bool ensure_blt_source_window(size_t page_count) {
+    if (page_count == 0 || page_count > SIZE_MAX / kPageSize ||
+        g_state.ggtt_table_phys == 0 || !g_state.blt_ready) {
+        return false;
+    }
+    if (g_state.blt_source_ptes != nullptr &&
+        page_count <= g_state.blt_source_page_capacity) {
+        return true;
+    }
+
+    const uint64_t source_ggtt = align_up_u64(
+        g_state.blt_ring_ggtt + kBltRingSize, kPageSize);
+    const uint64_t source_bytes = static_cast<uint64_t>(page_count) * kPageSize;
+    if (source_ggtt > g_state.aperture_size ||
+        source_bytes > g_state.aperture_size - source_ggtt ||
+        page_count > SIZE_MAX / sizeof(uint64_t)) {
+        return false;
+    }
+    const uint64_t first_entry = source_ggtt / kPageSize;
+    if (first_entry > UINT64_MAX / sizeof(uint64_t) ||
+        g_state.ggtt_table_phys > UINT64_MAX - first_entry * sizeof(uint64_t)) {
+        return false;
+    }
+    auto* ptes = reinterpret_cast<volatile uint64_t*>(map_physical_range(
+        g_state.ggtt_table_phys + first_entry * sizeof(uint64_t),
+        page_count * sizeof(uint64_t),
+        PAGE_FLAG_WRITE | PAGE_FLAG_WRITE_THROUGH | PAGE_FLAG_CACHE_DISABLE,
+        "BLT source GGTT"));
+    if (ptes == nullptr) {
+        return false;
+    }
+    g_state.blt_source_ggtt = source_ggtt;
+    g_state.blt_source_ptes = ptes;
+    g_state.blt_source_page_capacity = page_count;
+    return true;
+}
+
 bool submit_blt_commands(const uint32_t* commands, size_t dword_count) {
     if (commands == nullptr || dword_count == 0 || g_state.blt_ring_cpu == nullptr) {
         return false;
@@ -470,6 +514,148 @@ bool submit_blt_commands(const uint32_t* commands, size_t dword_count) {
         return false;
     }
     return true;
+}
+
+bool present_framebuffer(const display_accel::Surface& source,
+                         uint32_t x,
+                         uint32_t y,
+                         uint32_t width,
+                         uint32_t height) {
+    if (!g_state.active || g_state.active_pipe < 0 ||
+        g_state.active_pipe >= 3 || source.physical_pages == nullptr ||
+        source.bits_per_pixel != 32 || source.width == 0 || source.height == 0 ||
+        source.pitch_bytes == 0 || width == 0 || height == 0 ||
+        x >= source.width || y >= source.height || width > source.width - x ||
+        height > source.height - y || !setup_blt_engine()) {
+        return false;
+    }
+
+    const PlaneState& plane = g_state.planes[g_state.active_pipe];
+    const uint32_t destination_pitch =
+        (plane.stride & PLANE_STRIDE_MASK) * PLANE_STRIDE_GRANULARITY;
+    if (source.width != plane.width || source.height != plane.height ||
+        source.pitch_bytes != destination_pitch || x >= plane.width ||
+        y >= plane.height || width > plane.width - x || height > plane.height - y ||
+        source.pitch_bytes > 0xFFFFu ||
+        source.height > static_cast<size_t>(-1) / source.pitch_bytes ||
+        source.byte_length < static_cast<size_t>(source.pitch_bytes) * source.height ||
+        source.byte_length > SIZE_MAX - (kPageSize - 1)) {
+        return false;
+    }
+    const size_t required_pages =
+        (source.byte_length + kPageSize - 1) / kPageSize;
+    if (required_pages == 0 || required_pages > source.physical_page_count ||
+        !ensure_blt_source_window(required_pages)) {
+        return false;
+    }
+    for (size_t i = 0; i < required_pages; ++i) {
+        const uint64_t page = source.physical_pages[i];
+        if ((page & (kPageSize - 1)) != 0 || page == 0) {
+            return false;
+        }
+        g_state.blt_source_ptes[i] = page | kGen8GgttPagePresent;
+    }
+    mmio_write32(kGfxFlushCntlGen6, kGfxFlushCntlEn);
+    (void)mmio_read32(kGfxFlushCntlGen6);
+
+    uint32_t commands[10]{};
+    commands[0] = kXySrcCopyBltCmd | kBltWriteRgba | ((8 - 2) + 2);
+    commands[1] = kBltDepth32 | kBltRopSrcCopy | source.pitch_bytes;
+    commands[2] = (y << 16) | x;
+    commands[3] = ((y + height) << 16) | (x + width);
+    commands[4] = static_cast<uint32_t>(g_state.scanout_ggtt_offset & 0xFFFFFFFFu);
+    commands[5] = static_cast<uint32_t>(g_state.scanout_ggtt_offset >> 32);
+    commands[6] = (y << 16) | x;
+    commands[7] = source.pitch_bytes;
+    commands[8] = static_cast<uint32_t>(g_state.blt_source_ggtt & 0xFFFFFFFFu);
+    commands[9] = static_cast<uint32_t>(g_state.blt_source_ggtt >> 32);
+    return submit_blt_commands(commands, sizeof(commands) / sizeof(commands[0]));
+}
+
+bool fill_framebuffer(const display_accel::Surface& target,
+                      uint32_t x,
+                      uint32_t y,
+                      uint32_t width,
+                      uint32_t height,
+                      uint32_t color) {
+    if (!g_state.active || g_state.active_pipe < 0 || g_state.active_pipe >= 3 ||
+        target.physical_pages == nullptr || target.bits_per_pixel != 32 ||
+        target.pitch_bytes == 0 || target.width == 0 || target.height == 0 ||
+        width == 0 || height == 0 || x >= target.width || y >= target.height ||
+        width > target.width - x || height > target.height - y ||
+        target.pitch_bytes > 0xFFFFu || !setup_blt_engine()) {
+        return false;
+    }
+    const PlaneState& plane = g_state.planes[g_state.active_pipe];
+    const uint32_t pitch =
+        (plane.stride & PLANE_STRIDE_MASK) * PLANE_STRIDE_GRANULARITY;
+    if (target.width != plane.width || target.height != plane.height ||
+        target.pitch_bytes != pitch || target.height > SIZE_MAX / target.pitch_bytes ||
+        target.byte_length < static_cast<size_t>(target.pitch_bytes) * target.height ||
+        target.byte_length > SIZE_MAX - (kPageSize - 1)) {
+        return false;
+    }
+    const size_t pages = (target.byte_length + kPageSize - 1) / kPageSize;
+    if (pages == 0 || pages > target.physical_page_count ||
+        !ensure_blt_source_window(pages)) {
+        return false;
+    }
+    for (size_t i = 0; i < pages; ++i) {
+        const uint64_t page = target.physical_pages[i];
+        if (page == 0 || (page & (kPageSize - 1)) != 0) return false;
+        g_state.blt_source_ptes[i] = page | kGen8GgttPagePresent;
+    }
+    mmio_write32(kGfxFlushCntlGen6, kGfxFlushCntlEn);
+    (void)mmio_read32(kGfxFlushCntlGen6);
+    uint32_t commands[7]{};
+    commands[0] = kXyColorBltCmd | kBltWriteRgba | (7 - 2);
+    commands[1] = kBltDepth32 | kBltRopSrcCopy | target.pitch_bytes;
+    commands[2] = (y << 16) | x;
+    commands[3] = ((y + height) << 16) | (x + width);
+    commands[4] = static_cast<uint32_t>(g_state.blt_source_ggtt & 0xFFFFFFFFu);
+    commands[5] = static_cast<uint32_t>(g_state.blt_source_ggtt >> 32);
+    commands[6] = color;
+    return submit_blt_commands(commands, sizeof(commands) / sizeof(commands[0]));
+}
+
+// This is a deliberately restricted render-node operation.  The kernel has
+// already validated the byte range and owns all GGTT mappings; userspace never
+// supplies a GPU batch or GPU virtual address.
+bool render_fill(const render_accel::Surface& target,
+                 uint64_t byte_offset,
+                 uint32_t pitch_bytes,
+                 uint32_t x,
+                 uint32_t y,
+                 uint32_t width,
+                 uint32_t height,
+                 uint32_t color) {
+    if (!g_state.active || target.physical_pages == nullptr ||
+        target.physical_page_count == 0 ||
+        byte_offset > target.byte_length || (byte_offset & (kPageSize - 1)) != 0 ||
+        pitch_bytes == 0 || pitch_bytes > 0xFFFFu || width == 0 || height == 0 ||
+        x > pitch_bytes / 4 || width > pitch_bytes / 4 - x ||
+        y > 0xFFFFu || height > 0xFFFFu - y ||
+        !setup_blt_engine()) return false;
+    const size_t pages = (target.byte_length + kPageSize - 1) / kPageSize;
+    if (pages == 0 || pages > target.physical_page_count ||
+        !ensure_blt_source_window(pages)) return false;
+    for (size_t i = 0; i < pages; ++i) {
+        const uint64_t page = target.physical_pages[i];
+        if (page == 0 || (page & (kPageSize - 1)) != 0) return false;
+        g_state.blt_source_ptes[i] = page | kGen8GgttPagePresent;
+    }
+    mmio_write32(kGfxFlushCntlGen6, kGfxFlushCntlEn);
+    (void)mmio_read32(kGfxFlushCntlGen6);
+    uint32_t commands[7]{};
+    commands[0] = kXyColorBltCmd | kBltWriteRgba | (7 - 2);
+    commands[1] = kBltDepth32 | kBltRopSrcCopy | pitch_bytes;
+    commands[2] = (y << 16) | x;
+    commands[3] = ((y + height) << 16) | (x + width);
+    const uint64_t destination = g_state.blt_source_ggtt + byte_offset;
+    commands[4] = static_cast<uint32_t>(destination & 0xFFFFFFFFu);
+    commands[5] = static_cast<uint32_t>(destination >> 32);
+    commands[6] = color;
+    return submit_blt_commands(commands, sizeof(commands) / sizeof(commands[0]));
 }
 
 uint16_t decode_active_dimension(uint32_t reg_value) {
@@ -827,8 +1013,12 @@ bool init_device(const pci::PciDevice& device) {
         return false;
     }
 
-    if (next.mmio_size >= 2 * kPageSize) {
-        next.ggtt_table_phys = next.mmio_phys + (next.mmio_size / 2u);
+    if (next.mmio_size > kGgttTableOffset && next.aperture_size != 0) {
+        const uint64_t ggtt_bytes =
+            (next.aperture_size / kPageSize) * sizeof(uint64_t);
+        if (ggtt_bytes <= next.mmio_size - kGgttTableOffset) {
+            next.ggtt_table_phys = next.mmio_phys + kGgttTableOffset;
+        }
     }
 
     g_state = next;
@@ -839,6 +1029,10 @@ bool init_device(const pci::PciDevice& device) {
 
     (void)bind_current_scanout();
     g_state.active = true;
+    if (!register_framebuffer_acceleration()) {
+        log_message(LogLevel::Info,
+                    "intel-uhd: framebuffer acceleration unavailable; using CPU presentation");
+    }
     log_device_state();
     return true;
 }
@@ -979,6 +1173,21 @@ bool blit_copy(unsigned int src_x,
     commands[8] = static_cast<uint32_t>(g_state.scanout_ggtt_offset & 0xFFFFFFFFu);
     commands[9] = static_cast<uint32_t>(g_state.scanout_ggtt_offset >> 32);
     return submit_blt_commands(commands, sizeof(commands) / sizeof(commands[0]));
+}
+
+bool register_framebuffer_acceleration() {
+    if (!g_state.active || g_disabled || g_state.active_pipe < 0 ||
+        g_state.active_pipe >= 3) {
+        return false;
+    }
+    const display_accel::Ops ops{
+        .present = present_framebuffer,
+        .fill = fill_framebuffer,
+    };
+    const render_accel::Ops render_ops{.fill = render_fill};
+    const bool display_registered = neutrino_register_framebuffer_presenter(&ops);
+    const bool render_registered = neutrino_register_render_accelerator(&render_ops);
+    return display_registered || render_registered;
 }
 
 }  // namespace intel_uhd
