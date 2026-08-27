@@ -1,5 +1,5 @@
 [desktop]
-version = "1.4.0"
+version = "2.1.1"
 strategy = "over_root"
 description = "Neutrino graphical desktop session and assets"
 depends = ["base-system", "terminal", "neutrino-ui"]

@@ -1,0 +1,5 @@
+# A launcher is one file in /config/desktop/launchers.
+# Add, edit, or remove files here to customize the Start menu.
+label=Terminal
+path=@sys/binary/terminal.elf
+args=

@@ -12,8 +12,11 @@ namespace {
 
 constexpr uint32_t kKeyboardType =
     static_cast<uint32_t>(descriptor_defs::Type::Keyboard);
+constexpr uint32_t kAudioOutputType =
+    static_cast<uint32_t>(descriptor_defs::Type::AudioOutput);
 constexpr uint32_t kTitleHeight = neutrino::ui::Metrics::title_height;
 constexpr uint32_t kMaxWindows = 6;
+constexpr uint32_t kMaxLaunchers = 10;
 constexpr uint32_t kFallbackCursorWidth = 12;
 constexpr uint32_t kFallbackCursorHeight = 18;
 constexpr uint32_t kMaxCursorDimension = 64;
@@ -21,6 +24,8 @@ constexpr size_t kMaxCursorPixels =
     static_cast<size_t>(kMaxCursorDimension) * kMaxCursorDimension;
 constexpr size_t kMaxCursorFileSize = 16 * 1024;
 constexpr size_t kReceiveBufferSize = 2048;
+constexpr size_t kMaxLauncherFileSize = 1024;
+constexpr const char* kLauncherDirectory = "@sys/config/desktop/launchers";
 
 using Rect = neutrino::ui::Rect;
 using SceneDamage = neutrino::ui::DamageRegion<kMaxWindows * 2>;
@@ -34,14 +39,17 @@ struct Theme {
     uint32_t title_inactive = neutrino::ui::Palette::chrome_inactive;
     uint32_t accent = neutrino::ui::Palette::accent;
     uint32_t taskbar_height = neutrino::ui::Metrics::taskbar_height;
-    char launcher_label[17] = "DOOM";
-    char launcher_path[96] = "@sys/binary/doom.elf";
-    char launcher_args[160] = "-iwad @sys/doom1.wad";
     char cursor_bitmap[192] = "@sys/share/desktop/bitmaps/cur.bmp";
     uint32_t cursor_scale_low = 1;
     uint32_t cursor_scale_720p = 2;
     uint32_t cursor_scale_2k = 3;
     uint32_t cursor_scale_4k = 4;
+};
+
+struct Launcher {
+    char label[32];
+    char path[96];
+    char args[160];
 };
 
 struct CursorImage {
@@ -74,7 +82,10 @@ descriptor_defs::FramebufferInfo g_fb{};
 uint32_t g_framebuffer = kInvalidDescriptor;
 uint8_t* g_pixels = nullptr;
 uint32_t g_bytes_per_pixel = 0;
+bool g_gpu_fill_available = true;
 Theme g_theme{};
+Launcher g_launchers[kMaxLaunchers]{};
+size_t g_launcher_count = 0;
 CursorImage g_cursor{};
 neutrino::ui::WindowStack<Window, kMaxWindows> g_windows{};
 uint32_t g_next_window_id = 1;
@@ -82,6 +93,8 @@ int32_t g_cursor_x = 0;
 int32_t g_cursor_y = 0;
 uint8_t g_previous_buttons = 0;
 bool g_menu_open = false;
+uint32_t g_volume = 100;
+uint32_t g_last_nonzero_volume = 100;
 int32_t g_drag_index = -1;
 int32_t g_drag_offset_x = 0;
 int32_t g_drag_offset_y = 0;
@@ -90,6 +103,10 @@ Rect g_clip{};
 uint8_t g_receive_buffer[kReceiveBufferSize]{};
 size_t g_receive_used = 0;
 uint8_t g_cursor_file[kMaxCursorFileSize]{};
+
+constexpr int32_t kVolumeWidgetWidth = 136;
+constexpr int32_t kVolumeSliderLeft = 49;
+constexpr int32_t kVolumeSliderWidth = 76;
 
 void copy_text(char* output, size_t capacity, const char* input) {
     if (output == nullptr || capacity == 0) return;
@@ -113,6 +130,21 @@ void copy_fixed_text(char* output, size_t output_capacity,
         ++i;
     }
     output[i] = '\0';
+}
+
+void decimal_text(char* output, size_t capacity, uint32_t value) {
+    if (output == nullptr || capacity == 0) return;
+    char reversed[11]{};
+    size_t digits = 0;
+    do {
+        reversed[digits++] = static_cast<char>('0' + value % 10);
+        value /= 10;
+    } while (value != 0 && digits < sizeof(reversed));
+    size_t written = 0;
+    while (digits != 0 && written + 1 < capacity) {
+        output[written++] = reversed[--digits];
+    }
+    output[written] = '\0';
 }
 
 bool equal_text(const char* left, const char* right) {
@@ -171,12 +203,6 @@ void apply_setting(const char* key, const char* value) {
     else if (equal_text(key, "taskbar_height")) {
         uint32_t height = decimal(value, g_theme.taskbar_height);
         if (height >= 30 && height <= 80) g_theme.taskbar_height = height;
-    } else if (equal_text(key, "launcher_label")) {
-        copy_text(g_theme.launcher_label, sizeof(g_theme.launcher_label), value);
-    } else if (equal_text(key, "launcher_path")) {
-        copy_text(g_theme.launcher_path, sizeof(g_theme.launcher_path), value);
-    } else if (equal_text(key, "launcher_args")) {
-        copy_text(g_theme.launcher_args, sizeof(g_theme.launcher_args), value);
     } else if (equal_text(key, "cursor_bitmap")) {
         copy_text(g_theme.cursor_bitmap, sizeof(g_theme.cursor_bitmap), value);
     } else if (equal_text(key, "cursor_scale_low")) {
@@ -195,12 +221,39 @@ void apply_setting(const char* key, const char* value) {
 }
 
 void load_config() {
-    long file = file_open("@sys/config/desktop.cfg");
-    if (file < 0) return;
-    char bytes[1024]{};
-    long count = file_read(static_cast<uint32_t>(file), bytes, sizeof(bytes) - 1);
+    constexpr const char* kKeys[] = {
+        "desktop.background", "desktop.background_low", "desktop.taskbar",
+        "desktop.panel", "desktop.title", "desktop.title_inactive",
+        "desktop.accent", "desktop.taskbar_height", "desktop.cursor_bitmap",
+        "desktop.cursor_scale_low", "desktop.cursor_scale_720p",
+        "desktop.cursor_scale_2k", "desktop.cursor_scale_4k",
+    };
+    for (const char* key : kKeys) {
+        char value[256]{};
+        if (settings_get(key, value, sizeof(value)) <= 0) continue;
+        apply_setting(key + sizeof("desktop.") - 1, value);
+    }
+}
+
+void apply_launcher_setting(Launcher& launcher, const char* key,
+                            const char* value) {
+    if (equal_text(key, "label")) {
+        copy_text(launcher.label, sizeof(launcher.label), value);
+    } else if (equal_text(key, "path")) {
+        copy_text(launcher.path, sizeof(launcher.path), value);
+    } else if (equal_text(key, "args")) {
+        copy_text(launcher.args, sizeof(launcher.args), value);
+    }
+}
+
+bool load_launcher(uint32_t directory, const char* name, Launcher& launcher) {
+    long file = file_open_at(directory, name);
+    if (file < 0) return false;
+    char bytes[kMaxLauncherFileSize + 1]{};
+    long count = file_read(static_cast<uint32_t>(file), bytes,
+                           kMaxLauncherFileSize);
     file_close(static_cast<uint32_t>(file));
-    if (count <= 0) return;
+    if (count <= 0) return false;
     bytes[count] = '\0';
     char* line = bytes;
     for (long i = 0; i <= count; ++i) {
@@ -211,11 +264,80 @@ void load_config() {
             while (*separator != '\0' && *separator != '=') ++separator;
             if (*separator == '=') {
                 *separator = '\0';
-                apply_setting(line, separator + 1);
+                apply_launcher_setting(launcher, line, separator + 1);
             }
         }
         line = bytes + i + 1;
     }
+    return launcher.label[0] != '\0' && launcher.path[0] != '\0';
+}
+
+void load_launchers() {
+    g_launcher_count = 0;
+    long directory = directory_open(kLauncherDirectory);
+    if (directory < 0) return;
+    DirEntry entry{};
+    while (g_launcher_count < kMaxLaunchers &&
+           directory_read(static_cast<uint32_t>(directory), &entry) > 0) {
+        if ((entry.flags & 1u) != 0 || entry.name[0] == '\0') continue;
+        Launcher launcher{};
+        if (load_launcher(static_cast<uint32_t>(directory), entry.name, launcher)) {
+            g_launchers[g_launcher_count++] = launcher;
+        }
+    }
+    directory_close(static_cast<uint32_t>(directory));
+}
+
+bool set_system_volume(uint32_t volume) {
+    if (volume > 100) volume = 100;
+    long audio = descriptor_open(kAudioOutputType, 0);
+    if (audio < 0) return false;
+    descriptor_defs::AudioControlInfo control{
+        descriptor_defs::kAudioCommandSetVolume,
+        static_cast<int32_t>(volume)};
+    bool changed = descriptor_set_property(
+                       static_cast<uint32_t>(audio),
+                       static_cast<uint32_t>(descriptor_defs::Property::AudioControl),
+                       &control, sizeof(control)) == 0;
+    descriptor_close(static_cast<uint32_t>(audio));
+    if (!changed) return false;
+    g_volume = volume;
+    if (volume != 0) g_last_nonzero_volume = volume;
+    return true;
+}
+
+void adjust_system_volume(int32_t delta) {
+    int32_t volume = static_cast<int32_t>(g_volume) + delta;
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+    (void)set_system_volume(static_cast<uint32_t>(volume));
+}
+
+void toggle_system_mute() {
+    if (g_volume != 0) {
+        (void)set_system_volume(0);
+    } else {
+        (void)set_system_volume(g_last_nonzero_volume);
+    }
+}
+
+bool handle_volume_key(const descriptor_defs::KeyboardEvent& event) {
+    if ((event.flags & descriptor_defs::kKeyboardFlagPressed) == 0) return false;
+    const bool extended =
+        (event.flags & descriptor_defs::kKeyboardFlagExtended) != 0;
+    if (extended && event.scancode == 0x20) {
+        toggle_system_mute();
+        return true;
+    }
+    if (extended && event.scancode == 0x2e) {
+        adjust_system_volume(-5);
+        return true;
+    }
+    if (extended && event.scancode == 0x30) {
+        adjust_system_volume(5);
+        return true;
+    }
+    return false;
 }
 
 uint16_t little_u16(const uint8_t* bytes) {
@@ -387,6 +509,19 @@ void fill_rect(int32_t x, int32_t y, int32_t width, int32_t height, uint32_t rgb
     int32_t end_y = rect.y + rect.height < g_clip.y + g_clip.height
                         ? rect.y + rect.height : g_clip.y + g_clip.height;
     uint32_t value = native_color(rgb);
+    const uint64_t pixels = static_cast<uint64_t>(end_x - start_x) *
+                            static_cast<uint64_t>(end_y - start_y);
+    if (g_gpu_fill_available && g_bytes_per_pixel == sizeof(uint32_t) &&
+        pixels >= 1024) {
+        const descriptor_defs::FramebufferFill fill{
+            static_cast<uint32_t>(start_x), static_cast<uint32_t>(start_y),
+            static_cast<uint32_t>(end_x - start_x),
+            static_cast<uint32_t>(end_y - start_y), value};
+        if (framebuffer_fill(g_framebuffer, &fill) == 0) return;
+        // Unsupported systems retain the software renderer without paying for
+        // a failed descriptor operation on every future rectangle.
+        g_gpu_fill_available = false;
+    }
     if (g_bytes_per_pixel == sizeof(uint32_t)) {
         for (int32_t row = start_y; row < end_y; ++row) {
             auto* pixels = reinterpret_cast<uint32_t*>(
@@ -571,6 +706,20 @@ void draw_cursor() {
     }
 }
 
+int32_t start_menu_height() {
+    if (g_launcher_count == 0) return 88;
+    return 51 + static_cast<int32_t>(g_launcher_count) * 37;
+}
+
+int32_t start_menu_y(int32_t taskbar_y) {
+    int32_t menu_y = taskbar_y - start_menu_height();
+    return menu_y < 0 ? 0 : menu_y;
+}
+
+int32_t volume_widget_x() {
+    return static_cast<int32_t>(g_fb.width) - kVolumeWidgetWidth - 8;
+}
+
 void render(Rect damage) {
     damage = clipped(damage);
     if (damage.width <= 0 || damage.height <= 0) return;
@@ -601,29 +750,50 @@ void render(Rect damage) {
                neutrino::ui::Palette::outline);
     draw_text(18, taskbar_y + 20, "NEUTRINO",
               neutrino::ui::Palette::ink);
-    fill_rect(108, taskbar_y + 8, 104,
+    const int32_t volume_x = volume_widget_x();
+    fill_rect(volume_x, taskbar_y + 8, kVolumeWidgetWidth,
               static_cast<int32_t>(g_theme.taskbar_height) - 16, 0x2b3943);
-    draw_frame(108, taskbar_y + 8, 104,
+    draw_frame(volume_x, taskbar_y + 8, kVolumeWidgetWidth,
                static_cast<int32_t>(g_theme.taskbar_height) - 16, 0x52616b);
-    draw_text(122, taskbar_y + 20, g_theme.launcher_label,
+    draw_text(volume_x + 8, taskbar_y + 20, "VOL",
               neutrino::ui::Palette::chrome_text);
-
+    fill_rect(volume_x + kVolumeSliderLeft, taskbar_y + 18,
+              kVolumeSliderWidth, 8, 0x16232b);
+    const int32_t filled = static_cast<int32_t>(
+        g_volume * static_cast<uint32_t>(kVolumeSliderWidth) / 100u);
+    if (filled != 0) {
+        fill_rect(volume_x + kVolumeSliderLeft, taskbar_y + 18, filled, 8,
+                  g_theme.accent);
+    }
+    char volume_text[5]{};
+    decimal_text(volume_text, sizeof(volume_text), g_volume);
+    draw_text(volume_x + 101, taskbar_y + 20, volume_text,
+              neutrino::ui::Palette::chrome_text);
     for (size_t i = 0; i < g_windows.size(); ++i) {
         draw_window(g_windows[i], i + 1 == g_windows.size());
     }
     if (g_menu_open) {
-        int32_t menu_y = taskbar_y - 96;
-        fill_rect(11, menu_y + 4, 220, 88, neutrino::ui::Palette::shadow);
-        fill_rect(8, menu_y, 220, 88, g_theme.panel);
-        draw_frame(8, menu_y, 220, 88, neutrino::ui::Palette::outline);
+        int32_t menu_y = start_menu_y(taskbar_y);
+        int32_t menu_height = start_menu_height();
+        fill_rect(11, menu_y + 4, 220, menu_height,
+                  neutrino::ui::Palette::shadow);
+        fill_rect(8, menu_y, 220, menu_height, g_theme.panel);
+        draw_frame(8, menu_y, 220, menu_height, neutrino::ui::Palette::outline);
         fill_rect(9, menu_y + 1, 218, 30, g_theme.title);
         fill_rect(9, menu_y + 1, 218, 3, g_theme.accent);
         draw_text(20, menu_y + 12, "Applications",
                   neutrino::ui::Palette::chrome_text);
-        fill_rect(17, menu_y + 40, 202, 37, 0xdfe8ed);
-        draw_frame(17, menu_y + 40, 202, 37, 0xaab8c1);
-        draw_text(28, menu_y + 55, g_theme.launcher_label,
-                  neutrino::ui::Palette::ink);
+        if (g_launcher_count == 0) {
+            draw_text(28, menu_y + 51, "No applications configured",
+                      neutrino::ui::Palette::ink);
+        }
+        for (size_t i = 0; i < g_launcher_count; ++i) {
+            int32_t item_y = menu_y + 40 + static_cast<int32_t>(i) * 37;
+            fill_rect(17, item_y, 202, 37, 0xdfe8ed);
+            draw_frame(17, item_y, 202, 37, 0xaab8c1);
+            draw_text(28, item_y + 15, g_launchers[i].label,
+                      neutrino::ui::Palette::ink);
+        }
     }
     draw_cursor();
     descriptor_defs::FramebufferRect present{
@@ -661,11 +831,11 @@ void remove_window(uint32_t index) {
     render_damage(damage);
 }
 
-void launch_configured_app() {
-    if (g_theme.launcher_path[0] == '\0') return;
-    const char* args = g_theme.launcher_args[0] == '\0'
-                           ? nullptr : g_theme.launcher_args;
-    (void)child(g_theme.launcher_path, args, 0, "/");
+void launch_app(size_t index) {
+    if (index >= g_launcher_count) return;
+    const Launcher& launcher = g_launchers[index];
+    const char* args = launcher.args[0] == '\0' ? nullptr : launcher.args;
+    (void)child(launcher.path, args, 0, "/");
 }
 
 bool valid_name(const char* name, size_t capacity) {
@@ -906,11 +1076,18 @@ bool handle_keyboard(uint32_t keyboard) {
         bool pressed =
             (events[i].flags & descriptor_defs::kKeyboardFlagPressed) != 0;
         if (pressed && events[i].scancode == 0x58) return false;  // F12
+        if (handle_volume_key(events[i])) {
+            const int32_t taskbar_y = static_cast<int32_t>(
+                g_fb.height - g_theme.taskbar_height);
+            render({volume_widget_x(), taskbar_y, kVolumeWidgetWidth,
+                    static_cast<int32_t>(g_theme.taskbar_height)});
+            continue;
+        }
         if (pressed && events[i].scancode == 0x01 && g_menu_open) {
             g_menu_open = false;
             int32_t taskbar_y =
                 static_cast<int32_t>(g_fb.height - g_theme.taskbar_height);
-            render({8, taskbar_y - 96, 220, 88});
+            render({8, start_menu_y(taskbar_y), 220, start_menu_height()});
             continue;
         }
         Window* focused = g_windows.focused();
@@ -956,17 +1133,36 @@ void handle_mouse(uint32_t mouse) {
         if (left_pressed && g_cursor_y >= taskbar_y + 7) {
             if (g_cursor_x >= 8 && g_cursor_x < 100) {
                 g_menu_open = !g_menu_open;
-                damage = unite(damage, {8, taskbar_y - 96, 220, 88 +
+                damage = unite(damage, {8, start_menu_y(taskbar_y), 220,
+                                        start_menu_height() +
                                         static_cast<int32_t>(g_theme.taskbar_height)});
-            } else if (g_cursor_x >= 108 && g_cursor_x < 212) {
-                launch_configured_app();
+            } else if (g_cursor_x >= volume_widget_x() &&
+                       g_cursor_x < volume_widget_x() + kVolumeWidgetWidth) {
+                int32_t slider_left = volume_widget_x() + kVolumeSliderLeft;
+                if (g_cursor_x < slider_left) {
+                    toggle_system_mute();
+                } else {
+                    int32_t value = (g_cursor_x - slider_left) * 100 /
+                                    kVolumeSliderWidth;
+                    if (value > 100) value = 100;
+                    (void)set_system_volume(static_cast<uint32_t>(value));
+                }
+                damage = unite(damage, {volume_widget_x(), taskbar_y,
+                                        kVolumeWidgetWidth,
+                                        static_cast<int32_t>(g_theme.taskbar_height)});
             }
-        } else if (left_pressed && g_menu_open &&
-                   g_cursor_x >= 8 && g_cursor_x < 228 &&
-                   g_cursor_y >= taskbar_y - 65 && g_cursor_y < taskbar_y - 8) {
-            g_menu_open = false;
-            launch_configured_app();
-            damage = unite(damage, {8, taskbar_y - 96, 220, 88});
+        } else if (left_pressed && g_menu_open && g_cursor_x >= 17 &&
+                   g_cursor_x < 219) {
+            int32_t relative_y = g_cursor_y - start_menu_y(taskbar_y) - 40;
+            if (relative_y >= 0) {
+                size_t index = static_cast<size_t>(relative_y / 37);
+                if (index < g_launcher_count) {
+                    g_menu_open = false;
+                    launch_app(index);
+                    damage = unite(damage, {8, start_menu_y(taskbar_y), 220,
+                                            start_menu_height()});
+                }
+            }
         } else if (left_pressed) {
             int32_t index = window_at(g_cursor_x, g_cursor_y);
             if (index >= 0) {
@@ -1099,6 +1295,7 @@ bool initialize_server(uint32_t& pipe_out, uint32_t& registry_out) {
 
 int main(uint64_t, uint64_t) {
     load_config();
+    load_launchers();
     long session = graphical_session_open();
     if (session < 0) return 1;
     descriptor_defs::GraphicalSessionInfo session_info{};
