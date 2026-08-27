@@ -49,6 +49,11 @@ inline bool contains(Rect rect, int32_t x, int32_t y) {
            y < rect.y + rect.height;
 }
 
+inline int32_t centered_text_y(Rect rect, uint32_t scale = 1) {
+    const int32_t height = static_cast<int32_t>(8u * scale);
+    return rect.y + (rect.height - height) / 2;
+}
+
 class Canvas {
 public:
     Canvas(uint32_t* pixels, uint32_t width, uint32_t height, uint32_t stride = 0)
@@ -95,7 +100,7 @@ public:
         fill(rect, background); frame(rect, pressed ? Palette::outline : Palette::ink_muted);
         size_t length = 0; while (label && label[length]) ++length;
         text(rect.x + (rect.width - static_cast<int32_t>(length * 8)) / 2,
-             rect.y + (rect.height - 8) / 2, label, foreground);
+             centered_text_y(rect), label, foreground);
     }
 private:
     uint32_t* pixels_; uint32_t width_, height_, stride_; Rect clip_;
