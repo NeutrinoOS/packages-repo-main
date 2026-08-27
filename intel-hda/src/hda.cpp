@@ -615,16 +615,20 @@ size_t write_pcm(const void* data, size_t bytes) {
         // Once the ring is running, refill only after the controller has
         // moved into the next page.  Writing a few bytes immediately behind
         // LPIB can race a controller's DMA prefetch and produce crackles.
+        // This is a stream interface: never wait here while holding the HDA
+        // lock.  A stale DMA position after a client closes/reopens can
+        // otherwise make every mixer client spin behind this writer.  The
+        // caller will retry the short write on its next service pass.
         if (g_state.stream_running && g_state.queued_bytes != 0 &&
             available < kPageSize) {
-            relax();
-            continue;
+            break;
         }
         size_t chunk = bytes - done;
         if (chunk > available) chunk = available;
         size_t contiguous = kDmaBytes - g_state.write_position;
         if (chunk > contiguous) chunk = contiguous;
         chunk &= ~static_cast<size_t>(3);
+        if (chunk == 0) break;
         memcpy(g_state.dma + g_state.write_position,
                static_cast<const uint8_t*>(data) + done, chunk);
         g_state.write_position = (g_state.write_position + chunk) % kDmaBytes;
