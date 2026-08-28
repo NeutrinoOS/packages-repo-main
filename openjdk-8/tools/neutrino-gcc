@@ -1,0 +1,12 @@
+#!/bin/sh
+# OpenJDK invokes its target compiler by name.  Delegate to Neutrino's
+# toolchain wrapper so every target executable uses the Newlib SDK, crt0, and
+# Neutrino syscall support library.
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+neutrino_root=${NEUTRINO_ROOT:-"$script_dir/../../../neutrino"}
+
+export NEUTRINO_CROSS_CC=x86_64-elf-gcc
+exec "$neutrino_root/userspace/newlib-port/neutrino-cc" "$@"

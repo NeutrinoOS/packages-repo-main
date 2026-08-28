@@ -1,0 +1,11 @@
+#!/bin/sh
+# See neutrino-gcc.  The C++ entry point is kept separate because HotSpot is
+# built as C++ while the JDK native libraries also contain C sources.
+
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+neutrino_root=${NEUTRINO_ROOT:-"$script_dir/../../../neutrino"}
+
+export NEUTRINO_CROSS_CC=x86_64-elf-g++
+exec "$neutrino_root/userspace/newlib-port/neutrino-cc" "$@"

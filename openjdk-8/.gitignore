@@ -1,0 +1,6 @@
+# Upstream OpenJDK checkout
+
+build*/
+out/
+
+pkgroot/
