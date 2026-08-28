@@ -122,6 +122,10 @@ enum class SystemCall : long {
     SettingsKeyAt         = 97,
     MachineSettingsKeyAt  = 98,
     MachineSettingsAccess = 99,
+
+    DynamicLoad           = 100,
+    DynamicSymbol         = 101,
+    DynamicClose          = 102,
 };
 
 enum : uint32_t {

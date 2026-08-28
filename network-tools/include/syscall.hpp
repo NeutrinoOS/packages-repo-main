@@ -117,6 +117,10 @@ enum class SystemCall : long {
     ModuleInfo            = 92,
     SettingsGet           = 93,
     SettingsSet           = 94,
+
+    DynamicLoad           = 100,
+    DynamicSymbol         = 101,
+    DynamicClose          = 102,
 };
 
 enum : uint32_t {

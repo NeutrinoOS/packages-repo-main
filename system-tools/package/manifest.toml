@@ -1,5 +1,5 @@
 [system-tools]
-version = "1.6.0"
+version = "1.6.1"
 strategy = "over_root"
 description = "System, storage, account, and CPU utilities"
 depends = ["base-system"]

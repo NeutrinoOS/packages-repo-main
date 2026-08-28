@@ -1,5 +1,5 @@
 [network-tools]
-version = "2.4.0"
+version = "2.4.1"
 strategy = "over_root"
 description = "Network clients and diagnostics for Neutrino"
 depends = ["base-system", "bearssl", "ca-certificates", "network-services", "libnet"]
