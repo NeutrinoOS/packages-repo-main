@@ -8,7 +8,7 @@ OUT_DIR ?= out
 PACKAGE_ROOT := $(BUILD_DIR)/pkgroot
 PACKAGE_ZIP := $(OUT_DIR)/$(PACKAGE).zip
 MODULE_SOURCE := src/intel_uhd.cpp
-MODULE_HEADER := src/intel_uhd.hpp
+MODULE_HEADERS := src/intel_uhd.hpp src/gen9_probe_fs.hpp
 MODULE_OUTPUT := $(OUT_DIR)/$(MODULE)
 MODULE_CXXFLAGS := -std=c++20 -g -ffreestanding -O2 -Wall -Wextra -m64 \
 	-mno-red-zone -mno-sse -mno-mmx -mno-avx -mno-avx512f -mno-sse2 \
@@ -27,7 +27,7 @@ package: $(MODULE_OUTPUT) package/manifest.toml
 	rm -f $(PACKAGE_ZIP)
 	cd $(PACKAGE_ROOT) && zip -0 -r "$(abspath $(PACKAGE_ZIP))" manifest.toml modules
 
-$(MODULE_OUTPUT): $(MODULE_SOURCE) $(MODULE_HEADER) $(NEUTRINO_ROOT)/src/kernel/module.hpp
+$(MODULE_OUTPUT): $(MODULE_SOURCE) $(MODULE_HEADERS) $(NEUTRINO_ROOT)/src/kernel/module.hpp
 	@mkdir -p $(OUT_DIR)
 	$(CXX) $(MODULE_CXXFLAGS) -c $(MODULE_SOURCE) -o $@
 

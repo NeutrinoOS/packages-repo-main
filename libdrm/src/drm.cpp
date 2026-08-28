@@ -164,6 +164,30 @@ extern "C" int neutrino_render_close(int context) {
         (descriptor_close(static_cast<uint32_t>(context)) == 0 ? 0 : -1);
 }
 
+extern "C" int neutrino_render_get_device_info(
+    int context, struct neutrino_render_device_info* info) {
+    if (context < 0 || info == nullptr) return -1;
+    neutrino_render::DeviceInfo native{};
+    if (descriptor_get_property(
+            static_cast<uint32_t>(context),
+            static_cast<uint32_t>(neutrino_render::Property::DeviceInfo),
+            &native, sizeof(native)) != 0 || native.abi_major != 1)
+        return -1;
+    *info = {
+        native.abi_major,
+        native.abi_minor,
+        native.vendor_id,
+        native.device_id,
+        native.graphics_version,
+        native.graphics_version_minor,
+        native.engines,
+        native.capabilities,
+        native.max_buffer_count,
+        native.max_buffer_bytes,
+    };
+    return 0;
+}
+
 extern "C" void* neutrino_render_map(int context, size_t* bytes, int* gpu_accelerated) {
     neutrino_render::Info info{};
     if (context < 0 || descriptor_get_property(static_cast<uint32_t>(context),
@@ -237,8 +261,51 @@ extern "C" int neutrino_render_fence_status(int context, uint64_t* submitted,
 
 extern "C" int neutrino_render_wait_fence(int context, uint64_t fence,
                                             uint64_t timeout_ticks) {
-    const neutrino_render::FenceWait request{fence, timeout_ticks, 0, 0};
-    return context < 0 ? -1 : (descriptor_set_property(static_cast<uint32_t>(context),
-        static_cast<uint32_t>(neutrino_render::Property::WaitFence),
-        &request, sizeof(request)) == 0 ? 0 : -1);
+    if (context < 0 || fence == 0) return -1;
+    uint64_t waited = 0;
+    for (;;) {
+        neutrino_render::FenceInfo info{};
+        if (descriptor_get_property(
+                static_cast<uint32_t>(context),
+                static_cast<uint32_t>(neutrino_render::Property::FenceInfo),
+                &info, sizeof(info)) != 0 || fence > info.submitted_fence)
+            return -1;
+        if (info.completed_fence >= fence) return 0;
+        if (info.state == neutrino_render::kFenceFailed ||
+            info.state == neutrino_render::kFenceCancelled)
+            return -1;
+        if (timeout_ticks != 0 && waited >= timeout_ticks) return -1;
+        // Neutrino's scheduler tick is one millisecond. Sleeping returns to
+        // userspace scheduling so CPU-0 deferred completion can make progress.
+        if (sleep_ms(1) != 0) return -1;
+        ++waited;
+    }
+}
+
+extern "C" int neutrino_render_draw_demo(int context, uint32_t handle,
+                                            uint64_t fence) {
+    const neutrino_render::DemoDraw request{
+        fence, handle, 64u * sizeof(uint32_t), 64, 64, 0, 0};
+    return context < 0 ? -1 :
+        (descriptor_set_property(
+             static_cast<uint32_t>(context),
+             static_cast<uint32_t>(neutrino_render::Property::SubmitDemo),
+             &request, sizeof(request)) == 0
+             ? 0
+             : -1);
+}
+
+extern "C" int neutrino_render_sync_bo(int context, uint32_t handle,
+                                           uint64_t byte_offset,
+                                           uint64_t byte_length,
+                                           uint32_t flags) {
+    const neutrino_render::BufferSync request{
+        handle, flags, byte_offset, byte_length};
+    return context < 0 ? -1 :
+        (descriptor_set_property(
+             static_cast<uint32_t>(context),
+             static_cast<uint32_t>(neutrino_render::Property::SyncBuffer),
+             &request, sizeof(request)) == 0
+             ? 0
+             : -1);
 }

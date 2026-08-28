@@ -1,5 +1,5 @@
 [intel-uhd-gemini-lake]
-version = "0.8.0"
+version = "0.23.0"
 strategy = "over_root"
 description = "Intel UHD integrated graphics loadable kernel driver, including Gemini Lake"
 depends = ["base-system"]

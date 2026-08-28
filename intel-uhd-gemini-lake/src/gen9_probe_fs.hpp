@@ -1,0 +1,112 @@
+#pragma once
+
+#include <stddef.h>
+#include <stdint.h>
+
+namespace intel_uhd::gen9_probe_fs {
+
+// Generated for PCI ID 0x3185 by Mesa's Gen9 brw compiler at
+// 2329baffd13c67e7f82af81a543a8074cb9b325b.  The NIR shader stores
+// vec4(1.0, 0.25, 0.0, 1.0) to FRAG_RESULT_COLOR.  Mesa reported:
+//   program_size=208, SIMD8+SIMD16, no constants, no scratch,
+//   KSP0 GRF start=2, SIMD16 offset=128, KSP2 GRF start=2.
+// Keeping the compiler inputs and metadata beside the binary makes this
+// probe auditable and prevents command state from silently diverging from
+// the kernel it dispatches.
+constexpr uint32_t kKernel[] = {
+    0x00600001, 0x2fc03ee8, 0x38000000, 0x3f800000,
+    0x00600001, 0x2f603ee8, 0x38000000, 0x3e800000,
+    0x2000ab01, 0x00007c00, 0x00600001, 0x2fa03ee8,
+    0x38000000, 0x3f800000, 0x05600034, 0x0007b010,
+    0x00000fc3, 0x82031400, 0x2000007e, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00800001, 0x2fa03ee8, 0x38000000, 0x3f800000,
+    0x00800001, 0x2ee03ee8, 0x38000000, 0x3e800000,
+    0x2000b601, 0x00007900, 0x00800001, 0x2f603ee8,
+    0x38000000, 0x3f800000, 0x05800034, 0x00077010,
+    0x00000fa6, 0x84031000, 0x2000007e, 0x00000000,
+};
+
+constexpr size_t kKernelSize = sizeof(kKernel);
+constexpr uint32_t kHeapOffset = 0x100;
+constexpr uint32_t kSimd16Offset = 128;
+constexpr uint32_t kDispatchGrfStart = 2;
+
+// Packed with Mesa's generated Gen9 XML packer.  This is the BLORP-style
+// no-VS rectangle path: two vertex buffers, three vertex elements, explicit
+// URB allocation, empty constants, disabled unused shader stages, SBE/raster
+// state, null depth/stencil surfaces, dynamic-state pointers, and one
+// three-vertex RECTLIST primitive.  Addresses target the probe's private
+// PPGTT layout; all referenced pages remain kernel-owned.
+constexpr uint32_t kDrawPackets[] = {
+    0x78080007, 0x0002400c, 0x00107000, 0x00000000,
+    0x00000024, 0x04024000, 0x00107040, 0x00000000,
+    0x00000020,
+    0x78090005, 0x06000000, 0x12220000, 0x02400000,
+    0x11130000, 0x06000010, 0x11110000,
+    0x680b0000, 0x784a0000, 0xa0000000, 0x78490001,
+    0x00000000, 0x00000000, 0x78490001, 0x00000001,
+    0x00000000, 0x78490001, 0x00000002, 0x00000000,
+    0x784b0000, 0x0000000f,
+    0x78300000, 0x08000160, 0x78310000, 0x08000000,
+    0x78320000, 0x08000000, 0x78330000, 0x08000000,
+    0x780d0000, 0x00000000, 0x78180000, 0x00000001,
+    0x78150209, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x78190209,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x781a0209, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x78160209, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x78170209, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000,
+    0x78100007, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x781b0007, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x781c0002, 0x00000000,
+    0x00000000, 0x00000000, 0x781d0009, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x781e0003, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x78110008, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000000, 0x00000000, 0x00000000,
+    0x78120002, 0x00000000, 0x00000200, 0x00000000,
+    0x78130002, 0x00000000, 0x00000000, 0x00000000,
+    0x78500003, 0x00010000, 0x00000000, 0x00000000,
+    0x00000000, 0x781f0004, 0x30400820, 0x00000000,
+    0x00000000, 0xffffffff, 0xffffffff,
+    0x784e0002, 0x00000000, 0x00000000, 0x00000000,
+    0x78050006, 0xe0040000, 0x00000000, 0x00000000,
+    0x00000000, 0x00000002, 0x00000000, 0x00000000,
+    0x78060003, 0x00800000, 0x00000000, 0x00000000,
+    0x00000000, 0x78070003, 0x04000000, 0x00000000,
+    0x00000000, 0x00000000,
+    0x78240000, 0x00000241, 0x780e0000, 0x00000281,
+    0x78230000, 0x00000200,
+    0x7b000005, 0x0000000f, 0x00000003, 0x00000000,
+    0x00000001, 0x00000000, 0x00000000,
+};
+
+constexpr size_t kDrawPacketDwords =
+    sizeof(kDrawPackets) / sizeof(kDrawPackets[0]);
+constexpr uint32_t kVertexPpgtt = 0x00107000;
+constexpr uint32_t kViewportOffset = 0x200;
+constexpr uint32_t kBlendOffset = 0x240;
+constexpr uint32_t kColorCalcOffset = 0x280;
+constexpr uint32_t kExpectedPixel = 0xffff4000;
+
+static_assert(kKernelSize == 208);
+static_assert((kHeapOffset & 63u) == 0);
+static_assert((kSimd16Offset & 63u) == 0);
+static_assert(kDrawPacketDwords == 199);
+
+}  // namespace intel_uhd::gen9_probe_fs

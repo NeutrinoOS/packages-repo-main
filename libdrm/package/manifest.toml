@@ -1,5 +1,5 @@
 [libdrm]
-version = "1.3.0"
+version = "1.7.0"
 strategy = "over_root"
 description = "Neutrino DRM/KMS userspace library with CPU and accelerated presentation"
 depends = ["base-system"]
