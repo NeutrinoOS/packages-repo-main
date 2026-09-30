@@ -8,4 +8,5 @@ script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 neutrino_root=${NEUTRINO_ROOT:-"$script_dir/../../../neutrino"}
 
 export NEUTRINO_CROSS_CC=x86_64-elf-g++
+export NEUTRINO_SHARED_OBJECT_NAMESPACE=openjdk-8
 exec "$neutrino_root/userspace/newlib-port/neutrino-cc" "$@"

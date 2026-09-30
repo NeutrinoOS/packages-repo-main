@@ -1,5 +1,5 @@
 [openjdk-8]
-version = "0.1.0"
+version = "0.12.5"
 strategy = "over_root"
 description = "Headless OpenJDK 8 runtime for Neutrino (experimental)"
 depends = ["ca-certificates"]
