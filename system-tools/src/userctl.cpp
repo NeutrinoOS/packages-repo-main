@@ -37,6 +37,8 @@ constexpr CapabilitySpec kCapabilities[] = {
     {"system-monitor", 19},
     {"kernel-log", 20},
     {"filesystem-override", 21},
+    {"system-read-settings", 22},
+    {"memory-write-execute", 23},
 };
 
 constexpr uint64_t kDesktopCapabilities =
