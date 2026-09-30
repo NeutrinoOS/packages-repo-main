@@ -6,4 +6,9 @@
 main/
 out/
 build/
+out-release/
+build-release/
+*/out-*/
+*/build-*/
+openjdk-8/src/
 /local-files/

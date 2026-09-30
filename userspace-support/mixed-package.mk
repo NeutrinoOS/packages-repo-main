@@ -24,7 +24,13 @@ LEGACY_LIBC_SOURCES := $(SUPPORT_ROOT)/libc/ctype.cpp $(SUPPORT_ROOT)/libc/neutr
 LEGACY_LIBC_OBJECTS := $(patsubst $(SUPPORT_ROOT)/%.cpp,$(BUILD_DIR)/legacy/support/%.o,$(LEGACY_LIBC_SOURCES))
 PACKAGE_ROOT := $(BUILD_DIR)/pkgroot
 PACKAGE_ZIP := $(OUT_DIR)/$(PACKAGE).zip
-CFLAGS ?= -O2 -g -ffreestanding -fno-builtin -fno-stack-protector -nostdlib -m64 -mno-red-zone -mno-avx -mno-avx512f -fPIE -std=c11 -Wall -Wextra -Wpedantic -isystem $(NEUTRINO_SYSROOT)/include -isystem $(NEUTRINO_TARGET_ROOT)/include
+NEUTRINO_RELEASE ?= 0
+ifeq ($(NEUTRINO_RELEASE),1)
+DEBUG_CFLAGS :=
+else
+DEBUG_CFLAGS := -g
+endif
+CFLAGS ?= -O2 $(DEBUG_CFLAGS) -ffreestanding -fno-builtin -fno-stack-protector -nostdlib -m64 -mno-red-zone -mno-avx -mno-avx512f -fPIE -std=c11 -Wall -Wextra -Wpedantic -isystem $(NEUTRINO_SYSROOT)/include -isystem $(NEUTRINO_TARGET_ROOT)/include
 CXXFLAGS ?= -std=c++20 -O2 -ffreestanding -fno-builtin -fno-stack-protector -nostdlib -m64 -mno-red-zone -mno-mmx -mno-sse -mno-sse2 -mno-avx -mno-avx512f -fPIE -pie -fno-gnu-unique -Wall -Wextra -I$(SUPPORT_ROOT)/helpers -I$(SUPPORT_ROOT)/crt -I$(SUPPORT_ROOT)/libc/include -I$(NEUTRINO_ROOT)/shared/include
 .PHONY: all package clean
 all: $(PROGRAM_TARGETS)

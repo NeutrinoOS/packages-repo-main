@@ -10,7 +10,13 @@ PACKAGE_ZIP := $(OUT_DIR)/$(PACKAGE).zip
 MODULE_SOURCE := src/e1000e.cpp
 MODULE_HEADER := src/e1000e.hpp
 MODULE_OUTPUT := $(OUT_DIR)/$(MODULE)
-MODULE_CXXFLAGS := -std=c++20 -g -ffreestanding -O2 -Wall -Wextra -m64 \
+NEUTRINO_RELEASE ?= 0
+ifeq ($(NEUTRINO_RELEASE),1)
+DEBUG_CXXFLAGS :=
+else
+DEBUG_CXXFLAGS := -g
+endif
+MODULE_CXXFLAGS := -std=c++20 $(DEBUG_CXXFLAGS) -ffreestanding -O2 -Wall -Wextra -m64 \
 	-mno-red-zone -mno-sse -mno-mmx -mno-avx -mno-avx512f -mno-sse2 \
 	-fno-exceptions -fno-rtti -mcmodel=kernel \
 	-I$(NEUTRINO_ROOT)/shared/include -I$(NEUTRINO_ROOT)/src \
