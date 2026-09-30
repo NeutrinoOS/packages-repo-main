@@ -77,12 +77,6 @@ struct Device {
     bool is_usb_mass_storage;
 };
 
-constexpr const char* kBootstrapPackages[] = {
-    "@sys/packages/base-system.zip",
-    "@sys/packages/bearssl.zip",
-    "@sys/packages/ca-certificates.zip",
-    "@sys/packages/neupak.zip",
-};
 constexpr const char* kOfflineReposPath = "@sys/packages/repos.cfg";
 constexpr const char* kOnlineReposPath = "@sys/config/neupak/repos.cfg";
 
@@ -1483,28 +1477,6 @@ bool prune_cloned_driver_packages(const char* target_root, long console) {
 }
 
 bool bootstrap_packages(const char* target_root, long console) {
-    set_cursor(console, 0, 7);
-    userspace::write_line(console, "Installing base packages...");
-    for (size_t i = 0; i < sizeof(kBootstrapPackages) / sizeof(kBootstrapPackages[0]); ++i) {
-        set_cursor(console, 0, 8);
-        userspace::write(console, "Package ");
-        userspace::write_u64(console, i + 1);
-        userspace::write(console, "/");
-        userspace::write_u64(
-            console, sizeof(kBootstrapPackages) / sizeof(kBootstrapPackages[0]));
-        userspace::write(console, ": ");
-        userspace::write(console, kBootstrapPackages[i]);
-        userspace::write(console, "                    ");
-        char command[320];
-        strlcpy(command, "install-local ", sizeof(command));
-        strlcpy(command + strlen(command),
-                kBootstrapPackages[i],
-                sizeof(command) - strlen(command));
-        if (!run_neupak(target_root, command, kBootstrapPackages[i], console)) {
-            return false;
-        }
-    }
-
     char target_repos[160];
     if (!append_path(target_root,
                      "config/neupak/repos.cfg",
@@ -1513,12 +1485,32 @@ bool bootstrap_packages(const char* target_root, long console) {
         return false;
     }
     file_remove(target_repos);
+    if (!ensure_installed_directory(target_root, "config", console) ||
+        !ensure_installed_directory(target_root, "config/neupak", console) ||
+        !copy_file_path(kOfflineReposPath, target_repos, console)) {
+        return false;
+    }
+
+    set_cursor(console, 0, 7);
+    userspace::write_line(console, "Indexing offline package repository...");
+    if (!run_neupak(target_root, "update-index", "local repository index", console)) {
+        return false;
+    }
+
+    set_cursor(console, 0, 7);
+    userspace::write_line(console, "Installing offline system package set...");
+    if (!run_neupak(target_root,
+                    "install --force-overwrite neutrino-live",
+                    "offline system package set",
+                    console)) {
+        return false;
+    }
+
+    // Installing neupak restores its online repository configuration. Reapply
+    // the live-medium repository before resolving optional driver packages.
+    file_remove(target_repos);
     if (!copy_file_path(kOfflineReposPath, target_repos, console) ||
         !run_neupak(target_root, "update-index", "local repository index", console) ||
-        !run_neupak(target_root,
-                    "install neutrino-live",
-                    "offline system package set",
-                    console) ||
         !install_detected_drivers(target_root, console)) {
         return false;
     }
@@ -1695,50 +1687,6 @@ bool write_installed_esp_config(const char* esp_name,
     return true;
 }
 
-bool protect_installed_user_store(const char* target_root, long console) {
-    void* root_user = user_find("root");
-    UserInfo root_info{};
-    if (root_user == nullptr || user_info(root_user, &root_info) != 0 ||
-        root_info.id_local == 0) {
-        userspace::write_line(console,
-                              "failed to resolve root user for credential ACL");
-        return false;
-    }
-
-    FileAclEntry acl{};
-    acl.machine_id = root_info.id_machine;
-    acl.local_id = root_info.id_local;
-    acl.write = AclValue::Allow;
-    acl.read = AclValue::Allow;
-    acl.delete_permission = AclValue::Allow;
-    acl.edit = AclValue::Allow;
-
-    const char* candidates[] = {"/system/users.ntd", "/users.ntd"};
-    bool found = false;
-    for (const char* suffix : candidates) {
-        char path[160];
-        if (!append_path(target_root, suffix + 1, path, sizeof(path))) {
-            return false;
-        }
-        long handle = file_open(path);
-        if (handle < 0) {
-            continue;
-        }
-        file_close(static_cast<uint32_t>(handle));
-        found = true;
-        if (file_set_acl(path, &acl, 1) != 0) {
-            userspace::write(console, "failed to protect credential store: ");
-            userspace::write_line(console, path);
-            return false;
-        }
-    }
-    if (!found) {
-        userspace::write_line(console,
-                              "installed credential store was not found");
-    }
-    return found;
-}
-
 bool install_neufs(const Device& src, const Device& dst, long console) {
     (void)src;
     clear_console(console);
@@ -1872,8 +1820,7 @@ bool install_neufs(const Device& src, const Device& dst, long console) {
 
     ok = bootstrap_packages(target_root, console) &&
          ensure_installed_root_home(target_root, console) &&
-         provision_installed_credentials(target_root, console) &&
-         protect_installed_user_store(target_root, console);
+         provision_installed_credentials(target_root, console);
     if (ok) {
         set_cursor(console, 0, 10);
         userspace::write_line(console, "NEUFS install complete.");
